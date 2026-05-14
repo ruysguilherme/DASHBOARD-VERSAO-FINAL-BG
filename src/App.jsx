@@ -331,14 +331,14 @@ const TT = ({ active, payload, label }) => {
 };
 
 // ─── KPI CARD ───
-function KPI({ label, value, sub, accent, icon }) {
+function KPI({ label, value, sub, accent, icon, onClick }) {
   return (
-    <div style={{ ...s.card, borderTop:`3px solid ${accent}`, position:'relative', overflow:'hidden' }}>
+    <button onClick={onClick} style={{ ...s.card, borderTop:`3px solid ${accent}`, position:'relative', overflow:'hidden', width:'100%', textAlign:'left', cursor:onClick?'pointer':'default' }}>
       <div style={{ position:'absolute', right:16, top:16, fontSize:28, opacity:0.12 }}>{icon}</div>
       <p style={s.label}>{label}</p>
       <p style={{ ...s.val, color:accent, marginTop:6, fontSize:'clamp(18px,3vw,28px)' }}>{value}</p>
       {sub && <p style={{ ...s.muted, marginTop:4, fontSize:11 }}>{sub}</p>}
-    </div>
+    </button>
   );
 }
 
@@ -621,7 +621,7 @@ function MonthlySummaryBanner({ mData, rows, currentMonth }) {
 }
 
 // ─── TAB: VISÃO GERAL ───
-function OverviewTab({ a, viewMode, selectedMonth, filters, currentMonth }) {
+function OverviewTab({ a, viewMode, selectedMonth, filters, currentMonth, onNavigate }) {
   const hide = useHideBalances();
   const { paidMonths } = usePaidMonths();
   const filteredRows = useMemo(() => filterTransactions(a.rows, filters), [a.rows, filters]);
@@ -740,22 +740,25 @@ function OverviewTab({ a, viewMode, selectedMonth, filters, currentMonth }) {
 
   // Visão anual
   const pending = pendingSettlement(a.monthly, paidMonths);
+  const ytg = a.monthly.slice(currentMonth + 1).reduce((s,m)=>s+m.net,0);
   const typeData = Object.entries(a.byType).map(([name,value])=>({name,value}));
   const catData = Object.entries(a.byCat).sort((x,y)=>y[1]-x[1]).map(([name,value])=>({name,value,fill:CAT_C[name]||C.muted}));
 
   return (
     <div>
       <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))', gap:16, marginBottom:24 }}>
-        <KPI label="Total Anual" value={maskFmtK(a.totalGeral, hide)} sub={`${a.rows.length} lançamentos`} accent={C.gold} icon="💰" />
-        <KPI label="Guilherme" value={maskFmtK(a.gTotal, hide)} sub={pct(a.gTotal,a.totalGeral)+' do total'} accent={C.blue} icon="👤" />
-        <KPI label="Bruna" value={maskFmtK(a.bTotal, hide)} sub={pct(a.bTotal,a.totalGeral)+' do total'} accent={C.amber} icon="👤" />
+        <KPI label="Total Anual" value={maskFmtK(a.totalGeral, hide)} sub={`${a.rows.length} lançamentos • clique para tabela`} accent={C.gold} icon="◈" onClick={()=>onNavigate?.('tabela')} />
+        <KPI label="Guilherme" value={maskFmtK(a.gTotal, hide)} sub={pct(a.gTotal,a.totalGeral)+' do total • detalhe em split'} accent={C.blue} icon="◉" onClick={()=>onNavigate?.('split')} />
+        <KPI label="Bruna" value={maskFmtK(a.bTotal, hide)} sub={pct(a.bTotal,a.totalGeral)+' do total • detalhe em split'} accent={C.amber} icon="◉" onClick={()=>onNavigate?.('split')} />
         <KPI
           label="Saldo a Liquidar"
           value={maskFmtK(Math.abs(pending.net), hide)}
           sub={pending.direction==='g2b'?'Guilherme → Bruna':pending.direction==='b2g'?'Bruna → Guilherme':'Zerado'}
           accent={pending.direction==='g2b'?C.red:pending.direction==='b2g'?C.green:C.muted}
-          icon="⚖️"
+          icon="◬"
+          onClick={()=>onNavigate?.('encontro')}
         />
+        <KPI label="YTG (Saldo Futuro)" value={maskFmtK(Math.abs(ytg), hide)} sub={ytg>=0?'Guilherme → Bruna':'Bruna → Guilherme'} accent={ytg>=0?C.red:C.green} icon="⌁" onClick={()=>onNavigate?.('encontro')} />
       </div>
 
       <div style={{ display:'grid', gridTemplateColumns:'2fr 1fr', gap:16, marginBottom:16 }}>
@@ -1445,6 +1448,14 @@ function TabelaTab({ rows, onChange }) {
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(applied);
 
+  const getWindowSum = (row, f) => {
+    const lo = Math.min(f.monthFrom, f.monthTo);
+    const hi = Math.max(f.monthFrom, f.monthTo);
+    let sumWindow = 0;
+    for (let i=lo;i<=hi;i++) sumWindow += row.m[i] || 0;
+    return sumWindow;
+  };
+
   const filtered = useMemo(() => rows.filter(r => {
     const f = applied;
     if (f.q!=='all'&&r.q!==f.q) return false;
@@ -1553,7 +1564,7 @@ function TabelaTab({ rows, onChange }) {
                   <td style={{ padding:'10px 14px', fontSize:13, color:r.p===r.q?C.muted:C.green }}>{r.p}</td>
                   <td style={{ padding:'10px 14px' }}><span style={s.tag(CAT_C[r.c]||C.muted)}>{r.c}</span></td>
                   <td style={{ padding:'10px 14px', fontSize:13, color:C.text }}>{r.d}</td>
-                  <td style={{ padding:'10px 14px', fontFamily:'monospace', fontSize:13, color:r.total>0?C.text:C.muted, textAlign:'right' }}>{r.total>0?maskFmt(r.total, hide):'—'}</td>
+                  <td style={{ padding:'10px 14px', fontFamily:'monospace', fontSize:13, color:r.total>0?C.text:C.muted, textAlign:'right' }}>{maskFmt(getWindowSum(r, applied), hide)}</td>
                   <td style={{ padding:'10px 14px', textAlign:'right', whiteSpace:'nowrap' }}>
                     <button onClick={()=>startEdit(r)} style={{ ...s.btnGhost, padding:'4px 10px', marginRight:4 }} aria-label={`Editar ${r.d}`}>✏️</button>
                     <button onClick={()=>delRow(r.id)} style={{ ...s.btnGhost, padding:'4px 10px', borderColor:C.red, color:C.red }} aria-label={`Excluir ${r.d}`}>🗑</button>
@@ -1596,7 +1607,7 @@ function TabelaTab({ rows, onChange }) {
               ))}
             </div>
             <div style={{ marginTop:16, padding:'10px 14px', background:C.panel, borderRadius:8, fontSize:13, color:C.gold }}>
-              💰 Total: <strong>{fmt(editForm.m.reduce((s,v)=>s+v,0))}</strong>
+              ◈ Total: <strong>{fmt(editForm.m.reduce((s,v)=>s+v,0))}</strong>
             </div>
             <div style={{ display:'flex', justifyContent:'flex-end', gap:8, marginTop:16 }}>
               <button onClick={()=>{setEditId(null);setEditForm(null);}} style={s.btnGhost}>Cancelar</button>
@@ -1775,14 +1786,16 @@ function AtualizarTab({ onData, currentRows }) {
 
 // ─── TABS CONFIG ───
 const TABS = [
-  { id:'overview', label:'Visão Geral', icon:'📊' },
-  { id:'encontro', label:'Encontro', icon:'⚖️' },
-  { id:'split', label:'Split Anual', icon:'🔀' },
-  { id:'categorias', label:'Categorias', icon:'🏷' },
-  { id:'adicionar', label:'Adicionar', icon:'➕' },
-  { id:'tabela', label:'Tabela', icon:'📋' },
-  { id:'ia', label:'IA CFO', icon:'✨' },
-  { id:'atualizar', label:'Atualizar', icon:'🔄' },
+  { id:'overview', label:'Visão Geral', icon:'◈' },
+  { id:'encontro', label:'Encontro', icon:'◬' },
+  { id:'split', label:'Split Anual', icon:'⇆' },
+  { id:'categorias', label:'Categorias', icon:'◌' },
+  { id:'tabela', label:'Tabela', icon:'▦' },
+];
+const HIDDEN_TABS = [
+  { id:'adicionar', label:'Adicionar', icon:'⊕' },
+  { id:'ia', label:'IA CFO', icon:'◎' },
+  { id:'atualizar', label:'Atualizar', icon:'↻' },
 ];
 
 const MONTHLY_TABS = ['overview','encontro','split','categorias'];
@@ -1801,6 +1814,7 @@ export default function App() {
   const [selectedMonth, setSelectedMonth] = useState(currentMonth);
 
   const [hidePreviousMonths, setHidePreviousMonths] = useState(false);
+  const [showOpsPanel, setShowOpsPanel] = useState(false);
 
   // Ocultar saldos (eye toggle) — persiste em localStorage.
   const [hideBalances, setHideBalances] = useState(false);
@@ -1928,7 +1942,20 @@ export default function App() {
                 <span className="tab-label">{t.label}</span>
               </button>
             ))}
+            <button onClick={()=>setShowOpsPanel(v=>!v)}
+              style={{ marginLeft:'auto', padding:'12px 14px', background:'none', border:'none', color:showOpsPanel?C.gold:C.muted, cursor:'pointer', fontSize:12, whiteSpace:'nowrap' }}>
+              ◫ Painel oculto
+            </button>
           </div>
+          {showOpsPanel && (
+            <div style={{ background:C.panel, borderBottom:`1px solid ${C.border}`, padding:'6px 12px', display:'flex', gap:6, overflowX:'auto' }}>
+              {HIDDEN_TABS.map(t => (
+                <button key={t.id} onClick={()=>setTab(t.id)} style={{ padding:'8px 12px', border:`1px solid ${tab===t.id?C.gold:C.border}`, borderRadius:8, background:tab===t.id?C.goldDim:'transparent', color:tab===t.id?C.gold:C.muted, cursor:'pointer' }}>
+                  {t.icon} {t.label}
+                </button>
+              ))}
+            </div>
+          )}
 
           {/* ─── CONTROLS BAR ─── */}
           <div style={{ background:C.panel, borderBottom:`1px solid ${C.border}`, padding:'12px 20px' }}>
@@ -1961,7 +1988,7 @@ export default function App() {
 
           {/* ─── CONTENT ─── */}
           <div style={{ padding:'20px', maxWidth:1280, margin:'0 auto' }}>
-            {tab==='overview' && <OverviewTab a={a} viewMode={viewMode} selectedMonth={selectedMonth} filters={filters} currentMonth={currentMonth} />}
+            {tab==='overview' && <OverviewTab a={a} viewMode={viewMode} selectedMonth={selectedMonth} filters={filters} currentMonth={currentMonth} onNavigate={setTab} />}
             {tab==='encontro' && <EncontroTab a={a} viewMode={viewMode} selectedMonth={selectedMonth} currentMonth={currentMonth} />}
             {tab==='split' && <SplitTab a={a} viewMode={viewMode} selectedMonth={selectedMonth} currentMonth={currentMonth} />}
             {tab==='categorias' && <CategoriasTab a={a} viewMode={viewMode} selectedMonth={selectedMonth} />}
