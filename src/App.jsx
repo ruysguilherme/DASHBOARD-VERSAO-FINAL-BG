@@ -748,8 +748,8 @@ function OverviewTab({ a, viewMode, selectedMonth, filters, currentMonth, onNavi
     <div>
       <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))', gap:16, marginBottom:24 }}>
         <KPI label="Total Anual" value={maskFmtK(a.totalGeral, hide)} sub={`${a.rows.length} lançamentos • clique para tabela`} accent={C.gold} icon="◈" onClick={()=>onNavigate?.('tabela')} />
-        <KPI label="Guilherme" value={maskFmtK(a.gTotal, hide)} sub={pct(a.gTotal,a.totalGeral)+' do total • detalhe em split'} accent={C.blue} icon="◉" onClick={()=>onNavigate?.('split')} />
-        <KPI label="Bruna" value={maskFmtK(a.bTotal, hide)} sub={pct(a.bTotal,a.totalGeral)+' do total • detalhe em split'} accent={C.amber} icon="◉" onClick={()=>onNavigate?.('split')} />
+        <KPI label="Guilherme" value={maskFmtK(a.gTotal, hide)} sub={pct(a.gTotal,a.totalGeral)+' do total • detalhe em encontro'} accent={C.blue} icon="◉" onClick={()=>onNavigate?.('encontro')} />
+        <KPI label="Bruna" value={maskFmtK(a.bTotal, hide)} sub={pct(a.bTotal,a.totalGeral)+' do total • detalhe em encontro'} accent={C.amber} icon="◉" onClick={()=>onNavigate?.('encontro')} />
         <KPI
           label="Saldo a Liquidar"
           value={maskFmtK(Math.abs(pending.net), hide)}
@@ -1788,8 +1788,7 @@ function AtualizarTab({ onData, currentRows }) {
 const TABS = [
   { id:'overview', label:'Visão Geral', icon:'◈' },
   { id:'encontro', label:'Encontro', icon:'◬' },
-  { id:'split', label:'Split Anual', icon:'⇆' },
-  { id:'categorias', label:'Categorias', icon:'◌' },
+    { id:'categorias', label:'Categorias', icon:'◌' },
   { id:'tabela', label:'Tabela', icon:'▦' },
 ];
 const HIDDEN_TABS = [
@@ -1798,7 +1797,7 @@ const HIDDEN_TABS = [
   { id:'atualizar', label:'Atualizar', icon:'↻' },
 ];
 
-const MONTHLY_TABS = ['overview','encontro','split','categorias'];
+const MONTHLY_TABS = ['overview','encontro','categorias'];
 
 // ─── MAIN APP ───
 export default function App() {
@@ -1990,7 +1989,6 @@ export default function App() {
           <div style={{ padding:'20px', maxWidth:1280, margin:'0 auto' }}>
             {tab==='overview' && <OverviewTab a={a} viewMode={viewMode} selectedMonth={selectedMonth} filters={filters} currentMonth={currentMonth} onNavigate={setTab} />}
             {tab==='encontro' && <EncontroTab a={a} viewMode={viewMode} selectedMonth={selectedMonth} currentMonth={currentMonth} />}
-            {tab==='split' && <SplitTab a={a} viewMode={viewMode} selectedMonth={selectedMonth} currentMonth={currentMonth} />}
             {tab==='categorias' && <CategoriasTab a={a} viewMode={viewMode} selectedMonth={selectedMonth} />}
             {tab==='adicionar' && <AdicionarTab rows={data} onChange={updateData} />}
             {tab==='tabela' && <TabelaTab rows={data} onChange={updateData} />}
