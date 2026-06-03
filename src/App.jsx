@@ -679,10 +679,20 @@ function SegToggle({ value, options, onChange, accent = C.gold }) {
 // ver o total (para bater com a fatura) e cada compra com o valor cheio + o
 // quanto fica para cada pessoa (split). Despesas compartilhadas são gravadas em
 // duas linhas (uma por pessoa); aqui elas são reagrupadas pelo pagador (campo p).
-function ReconciliationPanel({ rows, monthIdx, isMobile }) {
+// O valor de cada compra é editável e a alteração é gravada nos mesmos
+// lançamentos da Tabela (rateada proporcionalmente entre as pessoas).
+function parseBRNumber(str) {
+  let sanitized = String(str).trim().replace(/\s/g, '').replace(/r\$/i, '');
+  if (sanitized.includes(',')) sanitized = sanitized.replace(/\./g, '').replace(',', '.');
+  const n = parseFloat(sanitized);
+  return isNaN(n) ? null : n;
+}
+
+function ReconciliationPanel({ rows, monthIdx, isMobile, onChange }) {
   const hide = useHideBalances();
   const [payer, setPayer] = useState('Bruna');
   const [tipo, setTipo] = useState('all');
+  const [edit, setEdit] = useState(null); // { key, value }
 
   const { items, total } = useMemo(() => {
     const monthRows = rows
@@ -692,9 +702,10 @@ function ReconciliationPanel({ rows, monthIdx, isMobile }) {
     const groups = {};
     monthRows.forEach(r => {
       const key = `${r.d}|${r.c}|${r.t}`;
-      if (!groups[key]) groups[key] = { d:r.d, c:r.c, t:r.t, total:0, Guilherme:0, Bruna:0 };
+      if (!groups[key]) groups[key] = { key, d:r.d, c:r.c, t:r.t, total:0, Guilherme:0, Bruna:0, parts:[] };
       groups[key].total += r.val;
       groups[key][r.q] = (groups[key][r.q] || 0) + r.val;
+      groups[key].parts.push({ id:r.id, q:r.q, val:r.val });
     });
     const items = Object.values(groups).sort((x,y) => y.total - x.total);
     const total = monthRows.reduce((s,r) => s + r.val, 0);
@@ -703,11 +714,43 @@ function ReconciliationPanel({ rows, monthIdx, isMobile }) {
 
   const payerColor = payer === 'Guilherme' ? C.blue : C.amber;
 
+  // Aplica o novo valor cheio da compra, rateando proporcionalmente entre os
+  // lançamentos que a compõem (preserva o split atual). A sobra de arredondamento
+  // vai para o último lançamento, garantindo que a soma bata exatamente.
+  const applyEdit = item => {
+    const newTotal = parseBRNumber(edit?.value);
+    if (newTotal === null || newTotal < 0) { setEdit(null); return; }
+    const old = item.total;
+    const valById = {};
+    let assigned = 0;
+    item.parts.forEach((p, idx) => {
+      let v;
+      if (idx === item.parts.length - 1) {
+        v = Math.round((newTotal - assigned) * 100) / 100;
+      } else {
+        const share = old > 0 ? newTotal * (p.val / old) : newTotal / item.parts.length;
+        v = Math.round(share * 100) / 100;
+        assigned += v;
+      }
+      valById[p.id] = v;
+    });
+    const next = rows.map(r => {
+      if (valById[r.id] === undefined) return r;
+      const nm = [...r.m];
+      nm[monthIdx] = valById[r.id];
+      return { ...r, m: nm, total: nm.reduce((s,v) => s + v, 0) };
+    });
+    onChange(next);
+    setEdit(null);
+  };
+
+  const startEdit = item => setEdit({ key:item.key, value:String(item.total.toFixed(2)).replace('.', ',') });
+
   return (
     <div style={{ ...s.card, marginBottom:16, border:`1px solid ${C.gold}40`, background:`linear-gradient(135deg, ${C.card}, #0A1E35)` }}>
       <p style={{ ...s.label, color:C.gold, marginBottom:4 }}>🧾 Conferência de Fatura</p>
       <p style={{ ...s.muted, fontSize:12, marginBottom:14, lineHeight:1.5 }}>
-        Confira o total contra a fatura/extrato e veja o split de cada compra.
+        Confira o total contra a fatura/extrato e veja o split de cada compra. Toque no valor para corrigir — a alteração é salva e aparece na Tabela.
       </p>
 
       <div style={{ display:'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap:12, marginBottom:16 }}>
@@ -715,7 +758,7 @@ function ReconciliationPanel({ rows, monthIdx, isMobile }) {
           <p style={{ ...s.label, marginBottom:6 }}>Quem pagou</p>
           <SegToggle
             value={payer}
-            onChange={setPayer}
+            onChange={v => { setEdit(null); setPayer(v); }}
             accent={payerColor}
             options={PESSOAS.map(p => ({ value:p, label:`👤 ${p}` }))}
           />
@@ -724,7 +767,7 @@ function ReconciliationPanel({ rows, monthIdx, isMobile }) {
           <p style={{ ...s.label, marginBottom:6 }}>Forma de pagamento</p>
           <SegToggle
             value={tipo}
-            onChange={setTipo}
+            onChange={v => { setEdit(null); setTipo(v); }}
             options={[{ value:'all', label:'Todos' }, ...TIPOS.map(t => ({ value:t, label:t }))]}
           />
         </div>
@@ -746,31 +789,69 @@ function ReconciliationPanel({ rows, monthIdx, isMobile }) {
         </p>
       ) : (
         <div style={{ display:'flex', flexDirection:'column', gap:8, maxHeight:420, overflowY:'auto' }}>
-          {items.map((it,i) => (
-            <div key={i} style={{ background:C.panel, borderRadius:10, padding:'10px 14px', borderLeft:`3px solid ${CAT_C[it.c]||C.muted}` }}>
-              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', gap:10 }}>
-                <div style={{ minWidth:0 }}>
-                  <p style={{ fontSize:14, color:C.text, fontWeight:600, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{it.d}</p>
-                  <div style={{ display:'flex', gap:6, marginTop:4, flexWrap:'wrap' }}>
-                    <span style={s.tag(CAT_C[it.c]||C.muted)}>{it.c}</span>
-                    <span style={s.tag(TYPE_C[it.t]||C.muted)}>{it.t}</span>
+          {items.map(it => {
+            const editing = edit?.key === it.key;
+            return (
+              <div key={it.key} style={{ background:C.panel, borderRadius:10, padding:'10px 14px', borderLeft:`3px solid ${CAT_C[it.c]||C.muted}` }}>
+                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', gap:10 }}>
+                  <div style={{ minWidth:0 }}>
+                    <p style={{ fontSize:14, color:C.text, fontWeight:600, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{it.d}</p>
+                    <div style={{ display:'flex', gap:6, marginTop:4, flexWrap:'wrap' }}>
+                      <span style={s.tag(CAT_C[it.c]||C.muted)}>{it.c}</span>
+                      <span style={s.tag(TYPE_C[it.t]||C.muted)}>{it.t}</span>
+                    </div>
                   </div>
+                  {editing ? null : hide ? (
+                    <p style={{ fontSize:16, fontFamily:'monospace', fontWeight:700, color:C.text, whiteSpace:'nowrap' }}>{HIDDEN_TOKEN}</p>
+                  ) : (
+                    <button
+                      onClick={() => startEdit(it)}
+                      aria-label={`Editar valor de ${it.d}`}
+                      style={{ display:'flex', alignItems:'center', gap:6, background:'transparent', border:`1px solid ${C.border}`, borderRadius:8, padding:'6px 10px', cursor:'pointer', whiteSpace:'nowrap' }}
+                    >
+                      <span style={{ fontSize:16, fontFamily:'monospace', fontWeight:700, color:C.text }}>{fmt(it.total)}</span>
+                      <span style={{ fontSize:12, opacity:0.6 }} aria-hidden="true">✏️</span>
+                    </button>
+                  )}
                 </div>
-                <p style={{ fontSize:16, fontFamily:'monospace', fontWeight:700, color:C.text, whiteSpace:'nowrap' }}>{maskFmt(it.total, hide)}</p>
-              </div>
-              <div style={{ display:'flex', gap:8, marginTop:10, paddingTop:10, borderTop:`1px dashed ${C.border}` }}>
-                {[['Guilherme',C.blue],['Bruna',C.amber]].map(([name,col]) => (
-                  <div key={name} style={{ flex:1, display:'flex', justifyContent:'space-between', alignItems:'center', gap:6 }}>
-                    <span style={{ fontSize:11, color:C.muted, display:'flex', alignItems:'center', gap:4 }}>
-                      <span style={{ width:7, height:7, borderRadius:'50%', background:col, display:'inline-block' }}/>
-                      {name}
-                    </span>
-                    <span style={{ fontSize:13, fontFamily:'monospace', color: it[name] ? col : C.dim }}>{maskFmt(it[name]||0, hide)}</span>
+
+                {editing && (
+                  <div style={{ marginTop:10, paddingTop:10, borderTop:`1px dashed ${C.border}` }}>
+                    <div style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
+                      <span style={{ fontSize:13, color:C.muted, fontFamily:'monospace' }}>R$</span>
+                      <input
+                        autoFocus
+                        type="text"
+                        inputMode="decimal"
+                        value={edit.value}
+                        onChange={e => setEdit({ key:it.key, value:e.target.value })}
+                        onKeyDown={e => { if (e.key === 'Enter') applyEdit(it); if (e.key === 'Escape') setEdit(null); }}
+                        style={{ ...s.input, flex:'1 1 120px', width:'auto', minHeight:44, fontFamily:'monospace' }}
+                        placeholder="0,00"
+                      />
+                      <button onClick={() => applyEdit(it)} style={{ ...s.btn(C.green), minHeight:44 }} aria-label="Salvar valor">✓ Salvar</button>
+                      <button onClick={() => setEdit(null)} style={{ ...s.btnGhost, minHeight:44 }} aria-label="Cancelar edição">✕</button>
+                    </div>
+                    <p style={{ ...s.muted, fontSize:11, marginTop:6 }}>
+                      O valor será rateado proporcionalmente entre Guilherme e Bruna e salvo na Tabela.
+                    </p>
                   </div>
-                ))}
+                )}
+
+                <div style={{ display:'flex', gap:8, marginTop:10, paddingTop:10, borderTop:`1px dashed ${C.border}` }}>
+                  {[['Guilherme',C.blue],['Bruna',C.amber]].map(([name,col]) => (
+                    <div key={name} style={{ flex:1, display:'flex', justifyContent:'space-between', alignItems:'center', gap:6 }}>
+                      <span style={{ fontSize:11, color:C.muted, display:'flex', alignItems:'center', gap:4 }}>
+                        <span style={{ width:7, height:7, borderRadius:'50%', background:col, display:'inline-block' }}/>
+                        {name}
+                      </span>
+                      <span style={{ fontSize:13, fontFamily:'monospace', color: it[name] ? col : C.dim }}>{maskFmt(it[name]||0, hide)}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
@@ -778,7 +859,7 @@ function ReconciliationPanel({ rows, monthIdx, isMobile }) {
 }
 
 // ─── TAB: VISÃO GERAL ───
-function OverviewTab({ a, viewMode, selectedMonth, filters, currentMonth, onNavigate }) {
+function OverviewTab({ a, viewMode, selectedMonth, filters, currentMonth, onNavigate, dataRows, onChange }) {
   const hide = useHideBalances();
   const isMobile = useIsMobile();
   const { paidMonths } = usePaidMonths();
@@ -807,7 +888,7 @@ function OverviewTab({ a, viewMode, selectedMonth, filters, currentMonth, onNavi
       <div>
         <MonthlySummaryBanner mData={mData} rows={filteredRows} currentMonth={currentMonth} />
 
-        <ReconciliationPanel rows={a.rows} monthIdx={selectedMonth} isMobile={isMobile} />
+        <ReconciliationPanel rows={dataRows} monthIdx={selectedMonth} isMobile={isMobile} onChange={onChange} />
 
         <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(280px,1fr))', gap:16, marginBottom:16 }}>
           <div style={s.card}>
@@ -908,17 +989,17 @@ function OverviewTab({ a, viewMode, selectedMonth, filters, currentMonth, onNavi
     <div>
       <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))', gap:16, marginBottom:24 }}>
         <KPI label="Total Anual" value={maskFmtK(a.totalGeral, hide)} sub={`${a.rows.length} lançamentos • clique para tabela`} accent={C.gold} icon="◈" onClick={()=>onNavigate?.('tabela')} />
-        <KPI label="Guilherme" value={maskFmtK(a.gTotal, hide)} sub={pct(a.gTotal,a.totalGeral)+' do total • detalhe em encontro'} accent={C.blue} icon="◉" onClick={()=>onNavigate?.('encontro')} />
-        <KPI label="Bruna" value={maskFmtK(a.bTotal, hide)} sub={pct(a.bTotal,a.totalGeral)+' do total • detalhe em encontro'} accent={C.amber} icon="◉" onClick={()=>onNavigate?.('encontro')} />
+        <KPI label="Guilherme" value={maskFmtK(a.gTotal, hide)} sub={pct(a.gTotal,a.totalGeral)+' do total • ver na tabela'} accent={C.blue} icon="◉" onClick={()=>onNavigate?.('tabela')} />
+        <KPI label="Bruna" value={maskFmtK(a.bTotal, hide)} sub={pct(a.bTotal,a.totalGeral)+' do total • ver na tabela'} accent={C.amber} icon="◉" onClick={()=>onNavigate?.('tabela')} />
         <KPI
           label="Saldo a Liquidar"
           value={maskFmtK(Math.abs(pending.net), hide)}
           sub={pending.direction==='g2b'?'Guilherme → Bruna':pending.direction==='b2g'?'Bruna → Guilherme':'Zerado'}
           accent={pending.direction==='g2b'?C.red:pending.direction==='b2g'?C.green:C.muted}
           icon="◬"
-          onClick={()=>onNavigate?.('encontro')}
+          onClick={()=>onNavigate?.('tabela')}
         />
-        <KPI label="YTG (Saldo Futuro)" value={maskFmtK(Math.abs(ytg), hide)} sub={ytg>=0?'Guilherme → Bruna':'Bruna → Guilherme'} accent={ytg>=0?C.red:C.green} icon="⌁" onClick={()=>onNavigate?.('encontro')} />
+        <KPI label="YTG (Saldo Futuro)" value={maskFmtK(Math.abs(ytg), hide)} sub={ytg>=0?'Guilherme → Bruna':'Bruna → Guilherme'} accent={ytg>=0?C.red:C.green} icon="⌁" onClick={()=>onNavigate?.('tabela')} />
       </div>
 
       <div style={{ display:'grid', gridTemplateColumns:isMobile?'1fr':'2fr 1fr', gap:16, marginBottom:16 }}>
@@ -1948,8 +2029,6 @@ function AtualizarTab({ onData, currentRows }) {
 // ─── TABS CONFIG ───
 const TABS = [
   { id:'overview', label:'Visão Geral', icon:'◈' },
-  { id:'encontro', label:'Encontro', icon:'◬' },
-    { id:'categorias', label:'Categorias', icon:'◌' },
   { id:'tabela', label:'Tabela', icon:'▦' },
 ];
 const HIDDEN_TABS = [
@@ -1958,7 +2037,7 @@ const HIDDEN_TABS = [
   { id:'atualizar', label:'Atualizar', icon:'↻' },
 ];
 
-const MONTHLY_TABS = ['overview','encontro','categorias'];
+const MONTHLY_TABS = ['overview'];
 
 // ─── MAIN APP ───
 export default function App() {
@@ -2155,9 +2234,7 @@ export default function App() {
 
           {/* ─── CONTENT ─── */}
           <div style={{ padding: isMobile ? '14px 12px 32px' : '20px', maxWidth:1280, margin:'0 auto' }}>
-            {tab==='overview' && <OverviewTab a={a} viewMode={viewMode} selectedMonth={selectedMonth} filters={filters} currentMonth={currentMonth} onNavigate={setTab} />}
-            {tab==='encontro' && <EncontroTab a={a} viewMode={viewMode} selectedMonth={selectedMonth} currentMonth={currentMonth} />}
-            {tab==='categorias' && <CategoriasTab a={a} viewMode={viewMode} selectedMonth={selectedMonth} />}
+            {tab==='overview' && <OverviewTab a={a} viewMode={viewMode} selectedMonth={selectedMonth} filters={filters} currentMonth={currentMonth} onNavigate={setTab} dataRows={data} onChange={updateData} />}
             {tab==='adicionar' && <AdicionarTab rows={data} onChange={updateData} />}
             {tab==='tabela' && <TabelaTab rows={data} onChange={updateData} />}
             {tab==='ia' && <IATab a={a} />}
