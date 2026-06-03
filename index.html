@@ -1,2 +1,30 @@
-<div id="root"></div>
-<script type="module" src="/src/main.jsx"></script>
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#030D1E" />
+    <meta name="color-scheme" content="dark" />
+    <title>BG Finance Management</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #030d1e;
+        /* Evita rolagem horizontal acidental no celular */
+        overflow-x: hidden;
+        /* Respeita o notch / safe-area no iOS */
+        -webkit-text-size-adjust: 100%;
+        text-size-adjust: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

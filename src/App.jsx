@@ -78,6 +78,31 @@ function maskFmtK(v, hide) { return hide ? HIDDEN_TOKEN : fmtK(v); }
 const PaidCtx = createContext({ paidMonths: {}, togglePaid: () => {} });
 function usePaidMonths() { return useContext(PaidCtx); }
 
+// ─── RESPONSIVE HOOK ───
+// Retorna true quando a viewport está no tamanho de celular (≤ breakpoint px).
+// Usado para empilhar colunas, reduzir espaçamentos e tornar os toques maiores.
+function useIsMobile(breakpoint = 640) {
+  const query = `(max-width: ${breakpoint}px)`;
+  const [isMobile, setIsMobile] = useState(() =>
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia(query).matches
+      : false
+  );
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const mq = window.matchMedia(query);
+    const handler = e => setIsMobile(e.matches);
+    setIsMobile(mq.matches);
+    if (mq.addEventListener) mq.addEventListener('change', handler);
+    else mq.addListener(handler);
+    return () => {
+      if (mq.removeEventListener) mq.removeEventListener('change', handler);
+      else mq.removeListener(handler);
+    };
+  }, [query]);
+  return isMobile;
+}
+
 function getMonthData(rows, monthIdx) {
   return rows.map(r => ({ ...r, monthVal: r.m[monthIdx] || 0 })).filter(r => r.monthVal > 0);
 }
@@ -620,9 +645,142 @@ function MonthlySummaryBanner({ mData, rows, currentMonth }) {
   );
 }
 
+// ─── SEGMENTED TOGGLE (pílulas tocáveis) ───
+// Grupo de botões para escolher uma opção. Alvos grandes (44px) para o dedo.
+function SegToggle({ value, options, onChange, accent = C.gold }) {
+  return (
+    <div style={{ display:'flex', flexWrap:'wrap', gap:6 }}>
+      {options.map(opt => {
+        const active = value === opt.value;
+        return (
+          <button
+            key={opt.value}
+            onClick={() => onChange(opt.value)}
+            aria-pressed={active}
+            style={{
+              flex:'1 1 auto', minHeight:44, padding:'8px 14px', borderRadius:10,
+              border:`1px solid ${active ? accent : C.border}`,
+              background: active ? `${accent}22` : C.panel,
+              color: active ? accent : C.muted,
+              fontSize:13, fontWeight:active?700:500, cursor:'pointer',
+              transition:'all 0.2s', whiteSpace:'nowrap',
+            }}
+          >
+            {opt.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── CONFERÊNCIA DE FATURA ───
+// Fluxo do dia a dia: escolher QUEM pagou a conta/fatura e o TIPO de pagamento,
+// ver o total (para bater com a fatura) e cada compra com o valor cheio + o
+// quanto fica para cada pessoa (split). Despesas compartilhadas são gravadas em
+// duas linhas (uma por pessoa); aqui elas são reagrupadas pelo pagador (campo p).
+function ReconciliationPanel({ rows, monthIdx, isMobile }) {
+  const hide = useHideBalances();
+  const [payer, setPayer] = useState('Bruna');
+  const [tipo, setTipo] = useState('all');
+
+  const { items, total } = useMemo(() => {
+    const monthRows = rows
+      .map(r => ({ ...r, val: r.m[monthIdx] || 0 }))
+      .filter(r => r.val > 0 && r.p === payer && (tipo === 'all' || r.t === tipo));
+
+    const groups = {};
+    monthRows.forEach(r => {
+      const key = `${r.d}|${r.c}|${r.t}`;
+      if (!groups[key]) groups[key] = { d:r.d, c:r.c, t:r.t, total:0, Guilherme:0, Bruna:0 };
+      groups[key].total += r.val;
+      groups[key][r.q] = (groups[key][r.q] || 0) + r.val;
+    });
+    const items = Object.values(groups).sort((x,y) => y.total - x.total);
+    const total = monthRows.reduce((s,r) => s + r.val, 0);
+    return { items, total };
+  }, [rows, monthIdx, payer, tipo]);
+
+  const payerColor = payer === 'Guilherme' ? C.blue : C.amber;
+
+  return (
+    <div style={{ ...s.card, marginBottom:16, border:`1px solid ${C.gold}40`, background:`linear-gradient(135deg, ${C.card}, #0A1E35)` }}>
+      <p style={{ ...s.label, color:C.gold, marginBottom:4 }}>🧾 Conferência de Fatura</p>
+      <p style={{ ...s.muted, fontSize:12, marginBottom:14, lineHeight:1.5 }}>
+        Confira o total contra a fatura/extrato e veja o split de cada compra.
+      </p>
+
+      <div style={{ display:'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap:12, marginBottom:16 }}>
+        <div>
+          <p style={{ ...s.label, marginBottom:6 }}>Quem pagou</p>
+          <SegToggle
+            value={payer}
+            onChange={setPayer}
+            accent={payerColor}
+            options={PESSOAS.map(p => ({ value:p, label:`👤 ${p}` }))}
+          />
+        </div>
+        <div>
+          <p style={{ ...s.label, marginBottom:6 }}>Forma de pagamento</p>
+          <SegToggle
+            value={tipo}
+            onChange={setTipo}
+            options={[{ value:'all', label:'Todos' }, ...TIPOS.map(t => ({ value:t, label:t }))]}
+          />
+        </div>
+      </div>
+
+      <div style={{ background:C.panel, borderRadius:10, padding:'14px 16px', marginBottom:items.length?14:0, display:'flex', justifyContent:'space-between', alignItems:'center', gap:10, flexWrap:'wrap', borderLeft:`3px solid ${payerColor}` }}>
+        <div>
+          <p style={{ fontSize:11, color:C.muted, letterSpacing:1, textTransform:'uppercase' }}>
+            Total pago por {payer}{tipo !== 'all' ? ` • ${tipo}` : ''}
+          </p>
+          <p style={{ fontSize:11, color:C.muted, marginTop:2 }}>{items.length} compra(s) em {ML[monthIdx]}</p>
+        </div>
+        <p style={{ fontSize:24, fontFamily:'monospace', fontWeight:700, color:payerColor }}>{maskFmt(total, hide)}</p>
+      </div>
+
+      {items.length === 0 ? (
+        <p style={{ ...s.muted, textAlign:'center', padding:'18px 0', fontSize:13 }}>
+          Nenhuma compra paga por {payer}{tipo !== 'all' ? ` no ${tipo}` : ''} em {ML[monthIdx]}.
+        </p>
+      ) : (
+        <div style={{ display:'flex', flexDirection:'column', gap:8, maxHeight:420, overflowY:'auto' }}>
+          {items.map((it,i) => (
+            <div key={i} style={{ background:C.panel, borderRadius:10, padding:'10px 14px', borderLeft:`3px solid ${CAT_C[it.c]||C.muted}` }}>
+              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', gap:10 }}>
+                <div style={{ minWidth:0 }}>
+                  <p style={{ fontSize:14, color:C.text, fontWeight:600, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{it.d}</p>
+                  <div style={{ display:'flex', gap:6, marginTop:4, flexWrap:'wrap' }}>
+                    <span style={s.tag(CAT_C[it.c]||C.muted)}>{it.c}</span>
+                    <span style={s.tag(TYPE_C[it.t]||C.muted)}>{it.t}</span>
+                  </div>
+                </div>
+                <p style={{ fontSize:16, fontFamily:'monospace', fontWeight:700, color:C.text, whiteSpace:'nowrap' }}>{maskFmt(it.total, hide)}</p>
+              </div>
+              <div style={{ display:'flex', gap:8, marginTop:10, paddingTop:10, borderTop:`1px dashed ${C.border}` }}>
+                {[['Guilherme',C.blue],['Bruna',C.amber]].map(([name,col]) => (
+                  <div key={name} style={{ flex:1, display:'flex', justifyContent:'space-between', alignItems:'center', gap:6 }}>
+                    <span style={{ fontSize:11, color:C.muted, display:'flex', alignItems:'center', gap:4 }}>
+                      <span style={{ width:7, height:7, borderRadius:'50%', background:col, display:'inline-block' }}/>
+                      {name}
+                    </span>
+                    <span style={{ fontSize:13, fontFamily:'monospace', color: it[name] ? col : C.dim }}>{maskFmt(it[name]||0, hide)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── TAB: VISÃO GERAL ───
 function OverviewTab({ a, viewMode, selectedMonth, filters, currentMonth, onNavigate }) {
   const hide = useHideBalances();
+  const isMobile = useIsMobile();
   const { paidMonths } = usePaidMonths();
   const filteredRows = useMemo(() => filterTransactions(a.rows, filters), [a.rows, filters]);
 
@@ -648,6 +806,8 @@ function OverviewTab({ a, viewMode, selectedMonth, filters, currentMonth, onNavi
     return (
       <div>
         <MonthlySummaryBanner mData={mData} rows={filteredRows} currentMonth={currentMonth} />
+
+        <ReconciliationPanel rows={a.rows} monthIdx={selectedMonth} isMobile={isMobile} />
 
         <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(280px,1fr))', gap:16, marginBottom:16 }}>
           <div style={s.card}>
@@ -761,7 +921,7 @@ function OverviewTab({ a, viewMode, selectedMonth, filters, currentMonth, onNavi
         <KPI label="YTG (Saldo Futuro)" value={maskFmtK(Math.abs(ytg), hide)} sub={ytg>=0?'Guilherme → Bruna':'Bruna → Guilherme'} accent={ytg>=0?C.red:C.green} icon="⌁" onClick={()=>onNavigate?.('encontro')} />
       </div>
 
-      <div style={{ display:'grid', gridTemplateColumns:'2fr 1fr', gap:16, marginBottom:16 }}>
+      <div style={{ display:'grid', gridTemplateColumns:isMobile?'1fr':'2fr 1fr', gap:16, marginBottom:16 }}>
         <div style={s.card}>
           <p style={{ ...s.label, marginBottom:16 }}>Despesas Mensais por Pessoa</p>
           <ResponsiveContainer width="100%" height={240}>
@@ -1438,6 +1598,7 @@ function AdicionarTab({ rows, onChange }) {
 function TabelaTab({ rows, onChange }) {
   const { paidMonths } = usePaidMonths();
   const hide = useHideBalances();
+  const isMobile = useIsMobile();
 
   // Rascunho de filtros (o usuário ajusta antes de aplicar).
   const initial = { search:'', q:'all', t:'all', c:'all', monthFrom:0, monthTo:11, status:'all' };
@@ -1590,7 +1751,7 @@ function TabelaTab({ rows, onChange }) {
               <p style={{ ...s.label, color:C.gold }}>✏️ Editar Despesa</p>
               <button onClick={()=>{setEditId(null);setEditForm(null);}} style={s.btnGhost}>✕ Cancelar</button>
             </div>
-            <div style={{ display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:12 }}>
+            <div style={{ display:'grid', gridTemplateColumns:isMobile?'1fr':'repeat(2,1fr)', gap:12 }}>
               <Field label="Tipo"><select style={s.input} value={editForm.t} onChange={e=>setEditForm({...editForm,t:e.target.value})}>{TIPOS.map(t=><option key={t} value={t}>{t}</option>)}</select></Field>
               <Field label="Categoria"><select style={s.input} value={editForm.c} onChange={e=>setEditForm({...editForm,c:e.target.value})}>{[...new Set([...CATEGORIAS,editForm.c])].map(c=><option key={c} value={c}>{c}</option>)}</select></Field>
               <Field label="Quem"><select style={s.input} value={editForm.q} onChange={e=>setEditForm({...editForm,q:e.target.value})}>{PESSOAS.map(p=><option key={p} value={p}>{p}</option>)}</select></Field>
@@ -1598,7 +1759,7 @@ function TabelaTab({ rows, onChange }) {
               <Field label="Descrição" span={2}><input style={s.input} value={editForm.d} onChange={e=>setEditForm({...editForm,d:e.target.value})} /></Field>
             </div>
             <p style={{ ...s.label, marginTop:20, marginBottom:8 }}>Valores Mensais</p>
-            <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:8 }}>
+            <div style={{ display:'grid', gridTemplateColumns:isMobile?'repeat(2,1fr)':'repeat(4,1fr)', gap:8 }}>
               {ML.map((mes,i) => (
                 <div key={i}>
                   <label style={{ fontSize:10, color:C.muted, marginBottom:2, display:'block' }}>{mes}</label>
@@ -1837,6 +1998,8 @@ export default function App() {
 
   const [filters, setFilters] = useState({ person:'all', paymentMethod:'all', category:'all' });
 
+  const isMobile = useIsMobile();
+
   const a = useMemo(() => recompute(data), [data]);
 
   // Auto-pula para o primeiro mês ativo na carga inicial se nada estiver selecionado.
@@ -1867,12 +2030,16 @@ export default function App() {
       select option { background: ${C.panel}; color: ${C.text}; }
       input::placeholder { color: ${C.muted}; opacity: 0.7; }
       input:focus, select:focus { border-color: ${C.gold} !important; box-shadow: 0 0 0 2px ${C.goldDim}; }
+      button { -webkit-tap-highlight-color: transparent; }
       button:hover { transform: translateY(-1px); filter: brightness(1.1); }
       button:active { transform: translateY(0) !important; }
       button:focus-visible { outline: 2px solid ${C.gold}; outline-offset: 2px; }
+      /* No celular o hover "gruda" após o toque; desativa o efeito de levantar. */
+      @media (hover: none) {
+        button:hover { transform: none; filter: none; }
+      }
       @media (max-width: 640px) {
         .hide-mobile { display: none !important; }
-        .tab-label { display: none; }
       }
     `;
     document.head.appendChild(style);
@@ -1893,7 +2060,7 @@ export default function App() {
           <div style={{
             background:C.panel,
             borderBottom:`1px solid ${C.border}`,
-            padding:'14px 20px',
+            padding: isMobile ? '12px 14px' : '14px 20px',
             display:'flex',
             justifyContent:'space-between',
             alignItems:'center',
@@ -1904,7 +2071,7 @@ export default function App() {
               <div>
                 <span style={{ fontSize:18, fontWeight:700, color:C.gold, letterSpacing:2 }}>BG</span>
                 <span style={{ fontSize:18, fontWeight:300, color:C.text, letterSpacing:1, marginLeft:6 }}>FINANCE</span>
-                <span style={{ fontSize:18, fontWeight:300, color:C.muted, letterSpacing:1, marginLeft:6 }}>MANAGEMENT</span>
+                <span className="hide-mobile" style={{ fontSize:18, fontWeight:300, color:C.muted, letterSpacing:1, marginLeft:6 }}>MANAGEMENT</span>
                 {loaded && <span style={{ fontSize:10, color:C.green, marginLeft:8 }} title="Dados carregados">●</span>}
               </div>
               <div style={{
@@ -1920,7 +2087,7 @@ export default function App() {
                 <span style={{ fontSize:12, color:C.gold, fontWeight:600 }}>{currentMonthLabel}</span>
               </div>
             </div>
-            <div style={{ display:'flex', alignItems:'center', gap:12, flexWrap:'wrap' }}>
+            <div style={{ display:'flex', alignItems:'center', gap:12, flexWrap:'wrap', justifyContent:'space-between', flex: isMobile ? '1 1 100%' : '0 0 auto' }}>
               <HideBalancesToggle hide={hideBalances} onChange={toggleHideBalance} />
               <div style={{ textAlign:'right' }}>
                 <p style={{ fontSize:10, color:C.muted, letterSpacing:1, textTransform:'uppercase' }}>Saldo a Liquidar</p>
@@ -1936,14 +2103,15 @@ export default function App() {
             {TABS.map(t => (
               <button key={t.id} onClick={()=>setTab(t.id)}
                 aria-pressed={tab===t.id}
-                style={{ padding:'12px 14px', background:'none', border:'none', borderBottom:`2px solid ${tab===t.id?C.gold:'transparent'}`, color:tab===t.id?C.gold:C.muted, cursor:'pointer', fontSize:12, fontWeight:tab===t.id?600:400, transition:'all 0.2s', whiteSpace:'nowrap', display:'flex', alignItems:'center', gap:5 }}>
+                style={{ padding: isMobile ? '14px 14px' : '12px 14px', minHeight:44, background:'none', border:'none', borderBottom:`2px solid ${tab===t.id?C.gold:'transparent'}`, color:tab===t.id?C.gold:C.muted, cursor:'pointer', fontSize:13, fontWeight:tab===t.id?600:400, transition:'all 0.2s', whiteSpace:'nowrap', display:'flex', alignItems:'center', gap:5 }}>
                 <span>{t.icon}</span>
                 <span className="tab-label">{t.label}</span>
               </button>
             ))}
             <button onClick={()=>setShowOpsPanel(v=>!v)}
-              style={{ marginLeft:'auto', padding:'12px 14px', background:'none', border:'none', color:showOpsPanel?C.gold:C.muted, cursor:'pointer', fontSize:12, whiteSpace:'nowrap' }}>
-              ◫ Painel oculto
+              aria-pressed={showOpsPanel}
+              style={{ marginLeft:'auto', padding: isMobile ? '14px 14px' : '12px 14px', minHeight:44, background:'none', border:'none', color:showOpsPanel?C.gold:C.muted, cursor:'pointer', fontSize:13, whiteSpace:'nowrap' }}>
+              ◫ <span className="hide-mobile">Painel oculto</span>
             </button>
           </div>
           {showOpsPanel && (
@@ -1957,7 +2125,7 @@ export default function App() {
           )}
 
           {/* ─── CONTROLS BAR ─── */}
-          <div style={{ background:C.panel, borderBottom:`1px solid ${C.border}`, padding:'12px 20px' }}>
+          <div style={{ background:C.panel, borderBottom:`1px solid ${C.border}`, padding: isMobile ? '10px 12px' : '12px 20px' }}>
             <div style={{ maxWidth:1280, margin:'0 auto', display:'flex', flexDirection:'column', gap:10 }}>
               <div style={{ display:'flex', alignItems:'center', gap:12, flexWrap:'wrap' }}>
                 {showViewToggle && (
@@ -1986,7 +2154,7 @@ export default function App() {
           </div>
 
           {/* ─── CONTENT ─── */}
-          <div style={{ padding:'20px', maxWidth:1280, margin:'0 auto' }}>
+          <div style={{ padding: isMobile ? '14px 12px 32px' : '20px', maxWidth:1280, margin:'0 auto' }}>
             {tab==='overview' && <OverviewTab a={a} viewMode={viewMode} selectedMonth={selectedMonth} filters={filters} currentMonth={currentMonth} onNavigate={setTab} />}
             {tab==='encontro' && <EncontroTab a={a} viewMode={viewMode} selectedMonth={selectedMonth} currentMonth={currentMonth} />}
             {tab==='categorias' && <CategoriasTab a={a} viewMode={viewMode} selectedMonth={selectedMonth} />}
