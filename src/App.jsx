@@ -242,11 +242,16 @@ const HIDE_BAL_KEY = 'bg_finance_hide_balances_v1';
 const PAID_MONTHS_KEY = 'bg_finance_paid_months_v1';
 
 async function loadData() {
+  // localStorage é a fonte principal (funciona no navegador). window.storage
+  // fica como fallback para ambientes sandbox que o disponibilizam.
+  try { const ls = localStorage.getItem(STORAGE_KEY); if (ls) return JSON.parse(ls); } catch(e) {}
   try { if (window?.storage) { const r = await window.storage.get(STORAGE_KEY); if (r?.value) return JSON.parse(r.value); } } catch(e) {}
   return INITIAL;
 }
 async function saveData(data) {
-  try { if (window?.storage) await window.storage.set(STORAGE_KEY, JSON.stringify(data)); } catch(e) {}
+  const payload = JSON.stringify(data);
+  try { localStorage.setItem(STORAGE_KEY, payload); } catch(e) {}
+  try { if (window?.storage) await window.storage.set(STORAGE_KEY, payload); } catch(e) {}
 }
 
 function loadHideBalancesPref() {
@@ -382,6 +387,36 @@ function Badge({ text, color }) {
     <span style={{ background:`${color}22`, color, fontSize:10, fontWeight:700, padding:'3px 8px', borderRadius:20, letterSpacing:1, display:'inline-flex', alignItems:'center', gap:4, whiteSpace:'nowrap' }}>
       {text}
     </span>
+  );
+}
+
+// ─── SAVE BUTTON ───
+// Salva manualmente os dados no navegador (localStorage). Mostra o estado:
+// alterações pendentes (dourado), salvo (verde por alguns segundos) ou em dia.
+function SaveButton({ dirty, justSaved, onSave }) {
+  const state = justSaved ? 'saved' : dirty ? 'dirty' : 'clean';
+  const cfg = {
+    dirty: { bg: C.gold, color: C.bg, border: C.gold, label: '💾 Salvar', title: 'Há alterações não salvas' },
+    saved: { bg: C.greenDim, color: C.green, border: C.green, label: '✓ Salvo!', title: 'Tudo salvo' },
+    clean: { bg: 'transparent', color: C.muted, border: C.border, label: '✓ Salvo', title: 'Sem alterações pendentes' },
+  }[state];
+  return (
+    <button
+      onClick={() => dirty && onSave()}
+      disabled={!dirty}
+      title={cfg.title}
+      aria-label={cfg.label}
+      style={{
+        background: cfg.bg, color: cfg.color, border: `1px solid ${cfg.border}`,
+        borderRadius: 26, padding: '8px 16px', fontSize: 13, fontWeight: 700,
+        cursor: dirty ? 'pointer' : 'default', whiteSpace: 'nowrap',
+        display: 'inline-flex', alignItems: 'center', gap: 6, transition: 'all 0.2s',
+        minHeight: 40,
+      }}
+    >
+      {dirty && <span aria-hidden="true" style={{ width:7, height:7, borderRadius:'50%', background:C.bg, display:'inline-block' }} />}
+      {cfg.label}
+    </button>
   );
 }
 
@@ -2045,6 +2080,10 @@ export default function App() {
   const [tab, setTab] = useState('overview');
   const [loaded, setLoaded] = useState(false);
 
+  // Controle de salvamento manual: dirty = alterações ainda não salvas.
+  const [dirty, setDirty] = useState(false);
+  const [justSaved, setJustSaved] = useState(false);
+
   // Mês atual dinâmico (timezone do navegador, esperado America/Sao_Paulo).
   const currentMonth = useMemo(() => new Date().getMonth(), []);
   const currentMonthLabel = useMemo(() => getCurrentMonthLabel(), []);
@@ -2124,7 +2163,22 @@ export default function App() {
     document.head.appendChild(style);
   }, []);
 
-  const updateData = useCallback(newData => { setData(newData); saveData(newData); }, []);
+  // Alterações ficam só na memória até o usuário clicar em Salvar.
+  const updateData = useCallback(newData => { setData(newData); setDirty(true); }, []);
+  const handleSave = useCallback(() => {
+    saveData(data);
+    setDirty(false);
+    setJustSaved(true);
+    setTimeout(() => setJustSaved(false), 2000);
+  }, [data]);
+
+  // Avisa se o usuário tentar sair com alterações não salvas.
+  useEffect(() => {
+    if (!dirty) return;
+    const handler = e => { e.preventDefault(); e.returnValue = ''; };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [dirty]);
 
   const showViewToggle = MONTHLY_TABS.includes(tab);
 
@@ -2167,6 +2221,7 @@ export default function App() {
               </div>
             </div>
             <div style={{ display:'flex', alignItems:'center', gap:12, flexWrap:'wrap', justifyContent:'space-between', flex: isMobile ? '1 1 100%' : '0 0 auto' }}>
+              <SaveButton dirty={dirty} justSaved={justSaved} onSave={handleSave} />
               <HideBalancesToggle hide={hideBalances} onChange={toggleHideBalance} />
               <div style={{ textAlign:'right' }}>
                 <p style={{ fontSize:10, color:C.muted, letterSpacing:1, textTransform:'uppercase' }}>Saldo a Liquidar</p>
