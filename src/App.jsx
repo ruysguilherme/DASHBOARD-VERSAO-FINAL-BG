@@ -2033,14 +2033,14 @@ Responda em markdown com EXATAMENTE estas seções (use "## " e listas com "- " 
         <div style={s.card}>
           <div style={{ display:'flex', justifyContent:'flex-end', marginBottom:4 }}>
             <Badge
-              text={source==='ai' ? '✨ Gerado por IA (Claude) ao vivo' : '📊 Análise local dos seus dados'}
+              text={source==='ai' ? '✨ Gerado por IA (Gemini) ao vivo' : '📊 Análise local dos seus dados'}
               color={source==='ai' ? C.gold : C.blue}
             />
           </div>
           {renderMD(insights)}
           {source==='local' && (
             <p style={{ ...s.muted, fontSize:11, marginTop:16, paddingTop:12, borderTop:`1px solid ${C.border}` }}>
-              💡 Para insights gerados pela IA da Claude, configure a variável <code style={{ color:C.gold }}>ANTHROPIC_API_KEY</code> no Vercel. Sem ela, a análise é calculada localmente a partir dos seus números.
+              💡 Para insights gerados pela IA do Google Gemini (grátis), configure a variável <code style={{ color:C.gold }}>GEMINI_API_KEY</code> no Vercel. Sem ela, a análise é calculada localmente a partir dos seus números.
             </p>
           )}
         </div>
