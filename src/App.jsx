@@ -1999,7 +1999,8 @@ Responda em markdown com EXATAMENTE estas seções (use "## " e listas com "- " 
         const err = data && data.error;
         if (resp.status === 503 || err === 'no_key') diag = 'A chave GEMINI_API_KEY não está chegando no servidor. Confirme a variável no Vercel (ambiente Production) e refaça o Redeploy.';
         else if (resp.status === 404) diag = 'O endpoint /api/insights não foi encontrado — a função serverless pode não ter sido publicada neste deploy.';
-        else if (resp.status === 400 || resp.status === 403) diag = `O Gemini recusou a requisição (${err || resp.status}). Verifique se a chave é válida e o modelo (GEMINI_MODEL).`;
+        else if (resp.status === 429) diag = 'A cota da IA está esgotada (o free tier da sua chave Google retornou limite 0). Tente gerar a chave em um novo projeto no Google AI Studio, ou use a análise local abaixo.';
+        else if (resp.status === 400 || resp.status === 401 || resp.status === 403) diag = `O Gemini recusou a requisição (${err || resp.status}). Verifique se a chave é válida.`;
         else if (resp.ok) diag = 'A IA retornou uma resposta vazia (pode ter sido bloqueada). Tente novamente.';
         else diag = `Falha ao chamar a IA (HTTP ${resp.status}${err ? ': ' + err : ''}).`;
       }
