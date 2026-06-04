@@ -1962,7 +1962,6 @@ function IATab({ a }) {
   const [loading, setLoading] = useState(false);
   const [done, setDone] = useState(false);
   const [source, setSource] = useState('local'); // 'ai' | 'local'
-  const [diag, setDiag] = useState(''); // motivo de não ter usado a IA
 
   const generate = async () => {
     setLoading(true); setInsights(''); setDone(false);
@@ -1985,7 +1984,9 @@ Responda em markdown com EXATAMENTE estas seções (use "## " e listas com "- " 
 ## 💡 OPORTUNIDADES DE ECONOMIA
 ## ✅ TOP 5 AÇÕES PRIORITÁRIAS`;
 
-    let text = '', src = 'local', diag = '';
+    // Tenta a IA (se configurada no servidor); em qualquer falha, usa a
+    // análise local silenciosamente.
+    let text = '', src = 'local';
     try {
       const resp = await fetch('/api/insights', {
         method: 'POST',
@@ -1995,21 +1996,11 @@ Responda em markdown com EXATAMENTE estas seções (use "## " e listas com "- " 
       const data = await resp.json().catch(() => null);
       if (resp.ok && data && typeof data.text === 'string' && data.text.trim()) {
         text = data.text; src = 'ai';
-      } else {
-        const err = data && data.error;
-        if (resp.status === 503 || err === 'no_key') diag = 'A chave GEMINI_API_KEY não está chegando no servidor. Confirme a variável no Vercel (ambiente Production) e refaça o Redeploy.';
-        else if (resp.status === 404) diag = 'O endpoint /api/insights não foi encontrado — a função serverless pode não ter sido publicada neste deploy.';
-        else if (resp.status === 429) diag = 'A cota da IA está esgotada (o free tier da sua chave Google retornou limite 0). Tente gerar a chave em um novo projeto no Google AI Studio, ou use a análise local abaixo.';
-        else if (resp.status === 400 || resp.status === 401 || resp.status === 403) diag = `O Gemini recusou a requisição (${err || resp.status}). Verifique se a chave é válida.`;
-        else if (resp.ok) diag = 'A IA retornou uma resposta vazia (pode ter sido bloqueada). Tente novamente.';
-        else diag = `Falha ao chamar a IA (HTTP ${resp.status}${err ? ': ' + err : ''}).`;
       }
-    } catch (e) {
-      diag = 'Não foi possível chamar /api/insights (sem resposta do servidor).';
-    }
+    } catch (e) { /* cai no fallback local */ }
 
     if (!text) { text = localInsights(a); src = 'local'; }
-    setInsights(text); setSource(src); setDiag(diag);
+    setInsights(text); setSource(src);
     setLoading(false); setDone(true);
   };
 
@@ -2026,7 +2017,7 @@ Responda em markdown com EXATAMENTE estas seções (use "## " e listas com "- " 
       <div style={{ ...s.card, marginBottom:16, borderColor:C.gold }}>
         <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', flexWrap:'wrap', gap:12 }}>
           <div>
-            <p style={{ ...s.label, color:C.gold }}>✨ CFO AI — Análise Inteligente</p>
+            <p style={{ ...s.label, color:C.gold }}>📊 Análise CFO</p>
             <p style={{ ...s.muted, marginTop:4 }}>Diagnóstico, alertas, split, otimizações e plano de ação — a partir dos seus dados reais.</p>
           </div>
           <button onClick={generate} disabled={loading} style={{ ...s.btn(loading?C.dim:C.gold), color:loading?C.muted:C.bg, cursor:loading?'not-allowed':'pointer' }}>
@@ -2050,16 +2041,9 @@ Responda em markdown com EXATAMENTE estas seções (use "## " e listas com "- " 
           </div>
           {renderMD(insights)}
           {source==='local' && (
-            <div style={{ marginTop:16, paddingTop:12, borderTop:`1px solid ${C.border}` }}>
-              {diag && (
-                <p style={{ fontSize:12, color:C.amber, marginBottom:6 }}>
-                  ⚠️ IA indisponível — {diag}
-                </p>
-              )}
-              <p style={{ ...s.muted, fontSize:11 }}>
-                💡 Para insights gerados pela IA do Google Gemini (grátis), configure a variável <code style={{ color:C.gold }}>GEMINI_API_KEY</code> no Vercel e refaça o Redeploy. Sem ela, a análise é calculada localmente a partir dos seus números.
-              </p>
-            </div>
+            <p style={{ ...s.muted, fontSize:11, marginTop:16, paddingTop:12, borderTop:`1px solid ${C.border}` }}>
+              💡 Análise calculada localmente a partir dos seus números, sem custo.
+            </p>
           )}
         </div>
       )}
@@ -2165,7 +2149,7 @@ function AtualizarTab({ onData, currentRows }) {
 const TABS = [
   { id:'overview', label:'Visão Geral', icon:'◈' },
   { id:'tabela', label:'Tabela', icon:'▦' },
-  { id:'ia', label:'IA CFO', icon:'◎' },
+  { id:'ia', label:'Análise CFO', icon:'◎' },
 ];
 const HIDDEN_TABS = [
   { id:'adicionar', label:'Adicionar', icon:'⊕' },
