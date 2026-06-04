@@ -237,21 +237,79 @@ const INITIAL = [
 ].map(r => ({ ...r, id: uid(), total: r.m.reduce((s,v)=>s+v,0) }));
 
 // ─── STORAGE (data + UI prefs) ───
+// Os lançamentos agora vivem numa base de dados na nuvem (Supabase), acessada
+// via /api/data. O localStorage passa a ser apenas um CACHE local: deixa o app
+// abrir instantâneo e funcionar offline, mas a fonte da verdade é o servidor —
+// é o que faz celular e computador verem os mesmos dados e nada se perder
+// quando o código é atualizado/republicado.
 const STORAGE_KEY = 'expenses_dashboard_v3';
 const HIDE_BAL_KEY = 'bg_finance_hide_balances_v1';
 const PAID_MONTHS_KEY = 'bg_finance_paid_months_v1';
+const API_DATA = '/api/data';
 
-async function loadData() {
-  // localStorage é a fonte principal (funciona no navegador). window.storage
-  // fica como fallback para ambientes sandbox que o disponibilizam.
+// Cache local (rápido + offline). window.storage é fallback p/ sandbox.
+async function loadLocalData() {
   try { const ls = localStorage.getItem(STORAGE_KEY); if (ls) return JSON.parse(ls); } catch(e) {}
   try { if (window?.storage) { const r = await window.storage.get(STORAGE_KEY); if (r?.value) return JSON.parse(r.value); } } catch(e) {}
-  return INITIAL;
+  return null;
 }
+function saveLocalData(payload) {
+  try { localStorage.setItem(STORAGE_KEY, payload); } catch(e) {}
+  try { if (window?.storage) window.storage.set(STORAGE_KEY, payload); } catch(e) {}
+}
+
+async function loadData() {
+  // 1) Tenta o servidor (banco na nuvem) — é a fonte da verdade.
+  let serverData = null;
+  let serverReachable = false;
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 8000); // não trava se a rede cair
+    const r = await fetch(API_DATA, { signal: ctrl.signal });
+    clearTimeout(t);
+    if (r.ok) {
+      serverReachable = true;
+      const j = await r.json().catch(() => null);
+      if (j && Array.isArray(j.data)) serverData = j.data;
+    }
+    // 503 (banco ainda não configurado) ou erro: serverReachable fica false.
+  } catch (e) { /* offline ou /api indisponível */ }
+
+  if (serverData && serverData.length) {
+    saveLocalData(JSON.stringify(serverData)); // atualiza o cache
+    return serverData;
+  }
+
+  // 2) Servidor vazio ou indisponível → usa o cache local; se não houver, a
+  //    semente inicial. Mantém os lançamentos visíveis mesmo sem banco.
+  const local = await loadLocalData();
+  const fallback = (local && local.length) ? local : INITIAL;
+
+  // 3) Migração/semeadura: se o servidor respondeu OK porém vazio, sobe o que
+  //    temos localmente (é assim que seus lançamentos atuais migram p/ a nuvem
+  //    na primeira abertura — abra primeiro no aparelho que tem os dados).
+  if (serverReachable && (!serverData || !serverData.length)) {
+    saveData(fallback).catch(() => {});
+  }
+  return fallback;
+}
+
+// Salva no servidor (fonte da verdade) e atualiza o cache local. Lança erro se
+// o servidor falhar, para a UI poder avisar e oferecer nova tentativa — mas o
+// cache local já foi gravado, então nada é perdido.
 async function saveData(data) {
   const payload = JSON.stringify(data);
-  try { localStorage.setItem(STORAGE_KEY, payload); } catch(e) {}
-  try { if (window?.storage) await window.storage.set(STORAGE_KEY, payload); } catch(e) {}
+  saveLocalData(payload);
+  const r = await fetch(API_DATA, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ data }),
+  });
+  if (!r.ok) {
+    let err = `HTTP ${r.status}`;
+    try { const j = await r.json(); if (j && j.error) err = j.error; } catch(e) {}
+    throw new Error(err);
+  }
 }
 
 function loadHideBalancesPref() {
@@ -391,30 +449,34 @@ function Badge({ text, color }) {
 }
 
 // ─── SAVE BUTTON ───
-// Salva manualmente os dados no navegador (localStorage). Mostra o estado:
-// alterações pendentes (dourado), salvo (verde por alguns segundos) ou em dia.
-function SaveButton({ dirty, justSaved, onSave }) {
-  const state = justSaved ? 'saved' : dirty ? 'dirty' : 'clean';
+// Salva os dados na nuvem (Supabase) + cache local. Mostra o estado: salvando
+// (em progresso), salvo (verde por alguns segundos), erro (vermelho, permite
+// tentar de novo), alterações pendentes (dourado) ou em dia.
+function SaveButton({ dirty, justSaved, saving, error, onSave }) {
+  const state = saving ? 'saving' : justSaved ? 'saved' : error ? 'error' : dirty ? 'dirty' : 'clean';
   const cfg = {
+    saving: { bg: C.goldDim, color: C.gold, border: C.gold, label: '⏳ Salvando…', title: 'Enviando para a nuvem' },
     dirty: { bg: C.gold, color: C.bg, border: C.gold, label: '💾 Salvar', title: 'Há alterações não salvas' },
-    saved: { bg: C.greenDim, color: C.green, border: C.green, label: '✓ Salvo!', title: 'Tudo salvo' },
+    saved: { bg: C.greenDim, color: C.green, border: C.green, label: '✓ Salvo!', title: 'Salvo na nuvem' },
+    error: { bg: C.redDim, color: C.red, border: C.red, label: '⚠️ Erro — tentar de novo', title: 'Não foi possível salvar na nuvem. Os dados estão no cache local; toque para tentar de novo.' },
     clean: { bg: 'transparent', color: C.muted, border: C.border, label: '✓ Salvo', title: 'Sem alterações pendentes' },
   }[state];
+  const clickable = (dirty || error) && !saving;
   return (
     <button
-      onClick={() => dirty && onSave()}
-      disabled={!dirty}
+      onClick={() => clickable && onSave()}
+      disabled={!clickable}
       title={cfg.title}
       aria-label={cfg.label}
       style={{
         background: cfg.bg, color: cfg.color, border: `1px solid ${cfg.border}`,
         borderRadius: 26, padding: '8px 16px', fontSize: 13, fontWeight: 700,
-        cursor: dirty ? 'pointer' : 'default', whiteSpace: 'nowrap',
+        cursor: clickable ? 'pointer' : 'default', whiteSpace: 'nowrap',
         display: 'inline-flex', alignItems: 'center', gap: 6, transition: 'all 0.2s',
         minHeight: 40,
       }}
     >
-      {dirty && <span aria-hidden="true" style={{ width:7, height:7, borderRadius:'50%', background:C.bg, display:'inline-block' }} />}
+      {state === 'dirty' && <span aria-hidden="true" style={{ width:7, height:7, borderRadius:'50%', background:C.bg, display:'inline-block' }} />}
       {cfg.label}
     </button>
   );
@@ -2167,6 +2229,8 @@ export default function App() {
   // Controle de salvamento manual: dirty = alterações ainda não salvas.
   const [dirty, setDirty] = useState(false);
   const [justSaved, setJustSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(false);
 
   // Mês atual dinâmico (timezone do navegador, esperado America/Sao_Paulo).
   const currentMonth = useMemo(() => new Date().getMonth(), []);
@@ -2248,12 +2312,23 @@ export default function App() {
   }, []);
 
   // Alterações ficam só na memória até o usuário clicar em Salvar.
-  const updateData = useCallback(newData => { setData(newData); setDirty(true); }, []);
-  const handleSave = useCallback(() => {
-    saveData(data);
-    setDirty(false);
-    setJustSaved(true);
-    setTimeout(() => setJustSaved(false), 2000);
+  const updateData = useCallback(newData => { setData(newData); setDirty(true); setSaveError(false); }, []);
+  const handleSave = useCallback(async () => {
+    setSaving(true);
+    setSaveError(false);
+    try {
+      await saveData(data);          // grava na nuvem + cache local
+      setDirty(false);
+      setJustSaved(true);
+      setTimeout(() => setJustSaved(false), 2000);
+    } catch (e) {
+      // Falhou na nuvem (offline ou banco não configurado). O cache local já
+      // foi gravado por saveData, então nada se perde; mantém "dirty" para a
+      // usuária poder tentar novamente.
+      setSaveError(true);
+    } finally {
+      setSaving(false);
+    }
   }, [data]);
 
   // Avisa se o usuário tentar sair com alterações não salvas.
@@ -2305,7 +2380,7 @@ export default function App() {
               </div>
             </div>
             <div style={{ display:'flex', alignItems:'center', gap:12, flexWrap:'wrap', justifyContent:'space-between', flex: isMobile ? '1 1 100%' : '0 0 auto' }}>
-              <SaveButton dirty={dirty} justSaved={justSaved} onSave={handleSave} />
+              <SaveButton dirty={dirty} justSaved={justSaved} saving={saving} error={saveError} onSave={handleSave} />
               <HideBalancesToggle hide={hideBalances} onChange={toggleHideBalance} />
               <div style={{ textAlign:'right' }}>
                 <p style={{ fontSize:10, color:C.muted, letterSpacing:1, textTransform:'uppercase' }}>Saldo a Liquidar</p>
