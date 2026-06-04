@@ -1898,10 +1898,70 @@ function TabelaTab({ rows, onChange }) {
 }
 
 // ─── TAB: IA CFO ───
+// ─── ANÁLISE LOCAL (fallback sem IA) ───
+// Gera um relatório no estilo CFO a partir dos números reais. Usado quando a
+// IA não está configurada/disponível, para o botão nunca quebrar.
+function localInsights(a) {
+  const net = a.g2b - a.b2g;
+  const months = a.monthlyActive.length || 1;
+  const avg = a.totalGeral / months;
+  const cats = Object.entries(a.byCat).sort((x, y) => y[1] - x[1]);
+  const topCat = cats[0];
+  const topItem = a.topDesc[0];
+  const peak = a.monthlyActive.reduce((p, c) => (c.total > p.total ? c : p), { total: 0, mes: '-' });
+  const low = a.monthlyActive.reduce((p, c) => (c.total < p.total ? c : p), { total: Infinity, mes: '-' });
+  let jump = null;
+  a.monthlyActive.forEach((m, i, arr) => {
+    if (i > 0 && arr[i - 1].total) {
+      const d = ((m.total - arr[i - 1].total) / arr[i - 1].total) * 100;
+      if (!jump || d > jump.pct) jump = { pct: d, from: arr[i - 1].mes, to: m.mes, val: m.total - arr[i - 1].total };
+    }
+  });
+  const cv = name => a.byCat[name] || 0;
+  const delivery = cv('Delivery'), lazer = cv('Lazer'), assin = cv('Assinaturas'), mercado = cv('Mercado');
+  const dirTxt = Math.abs(net) < 0.01
+    ? 'os saldos estão praticamente equilibrados'
+    : net > 0
+      ? `Guilherme deve repassar ${fmt(Math.abs(net))} para Bruna`
+      : `Bruna deve repassar ${fmt(Math.abs(net))} para Guilherme`;
+
+  const L = [];
+  L.push('## 🔍 DIAGNÓSTICO');
+  L.push(`Foram ${a.rows.length} lançamentos somando ${fmt(a.totalGeral)} no ano, média de ${fmt(avg)}/mês em ${months} ${months > 1 ? 'meses ativos' : 'mês ativo'}.`);
+  L.push(`Despesas fixas representam ${pct(a.fixedTotal, a.totalGeral)} (${fmt(a.fixedTotal)}) e variáveis ${pct(a.varTotal, a.totalGeral)} (${fmt(a.varTotal)}).`);
+  if (topCat) L.push(`A maior categoria é ${topCat[0]} com ${fmt(topCat[1])} (${pct(topCat[1], a.totalGeral)} do total).`);
+
+  L.push('## ⚡ ALERTAS');
+  if (topCat) L.push(`- ${topCat[0]} concentra ${pct(topCat[1], a.totalGeral)} dos gastos (${fmt(topCat[1])}) — concentração alta.`);
+  if (topItem) L.push(`- Maior despesa individual: ${topItem[0]} (${fmt(topItem[1])}).`);
+  if (jump && jump.pct > 0) L.push(`- Pico de variação: ${jump.from} → ${jump.to} subiu ${jump.pct.toFixed(0)}% (+${fmt(jump.val)}).`);
+  if (peak.mes !== '-') L.push(`- Mês mais caro: ${peak.mes} (${fmt(peak.total)}); mais barato: ${low.mes} (${fmt(low.total)}).`);
+
+  L.push('## ⚖️ ANÁLISE DO SPLIT');
+  L.push(`Guilherme arcou com ${fmt(a.gTotal)} (${pct(a.gTotal, a.totalGeral)}) e Bruna com ${fmt(a.bTotal)} (${pct(a.bTotal, a.totalGeral)}).`);
+  L.push(`No encontro de contas anual (bruto), ${dirTxt}.`);
+
+  L.push('## 💡 OPORTUNIDADES DE ECONOMIA');
+  if (delivery > 0) L.push(`- Delivery soma ${fmt(delivery)}. Reduzir 30% economizaria ~${fmt(delivery * 0.3)}/ano.`);
+  if (assin > 0) L.push(`- Assinaturas somam ${fmt(assin)}. Revise serviços pouco usados.`);
+  if (lazer > 0) L.push(`- Lazer soma ${fmt(lazer)} — vale definir um teto mensal.`);
+  if (mercado > 0) L.push(`- Mercado soma ${fmt(mercado)}; lista e compras planejadas reduzem desperdício.`);
+  if (delivery + assin + lazer + mercado === 0 && cats[1]) L.push(`- Avalie a segunda maior categoria: ${cats[1][0]} (${fmt(cats[1][1])}).`);
+
+  L.push('## ✅ TOP 5 AÇÕES PRIORITÁRIAS');
+  L.push(`1. Definir um teto mensal para ${topCat ? topCat[0] : 'a maior categoria'} e acompanhar de perto.`);
+  L.push(`2. Acertar/registrar o saldo do encontro de contas (${fmt(Math.abs(net))}).`);
+  L.push(`3. Revisar assinaturas e serviços recorrentes${assin > 0 ? ` (${fmt(assin)})` : ''}.`);
+  L.push(`4. Planejar o mês de pico${peak.mes !== '-' ? ` (${peak.mes})` : ''} para suavizar o orçamento.`);
+  L.push(`5. Manter a média mensal próxima ou abaixo de ${fmt(avg)} nos próximos meses.`);
+  return L.join('\n');
+}
+
 function IATab({ a }) {
   const [insights, setInsights] = useState('');
   const [loading, setLoading] = useState(false);
   const [done, setDone] = useState(false);
+  const [source, setSource] = useState('local'); // 'ai' | 'local'
 
   const generate = async () => {
     setLoading(true); setInsights(''); setDone(false);
@@ -1917,21 +1977,28 @@ CATEGORIAS: ${Object.entries(a.byCat).sort((x,y)=>y[1]-x[1]).map(([k,v])=>`${k}:
 EVOLUÇÃO: ${a.monthlyActive.map(m=>`${m.mes}:${fmt(m.total)}`).join(' | ')}
 TOP 5: ${a.topDesc.slice(0,5).map(([d,v])=>`${d}:${fmt(v)}`).join(' | ')}
 
-Responda com:
+Responda em markdown com EXATAMENTE estas seções (use "## " e listas com "- " ou "1."):
 ## 🔍 DIAGNÓSTICO
 ## ⚡ ALERTAS (3-4 específicos com valores)
 ## ⚖️ ANÁLISE DO SPLIT
 ## 💡 OPORTUNIDADES DE ECONOMIA
 ## ✅ TOP 5 AÇÕES PRIORITÁRIAS`;
 
+    let text = '', src = 'local';
     try {
-      const resp = await fetch("https://api.anthropic.com/v1/messages", {
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ model:"claude-sonnet-4-20250514", max_tokens:1500, messages:[{role:"user",content:prompt}] })
+      const resp = await fetch('/api/insights', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt }),
       });
-      const data = await resp.json();
-      setInsights((data.content||[]).map(b=>b.text||'').join('') || '❌ Resposta vazia.');
-    } catch(e) { setInsights('❌ Erro: '+e.message); }
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data && typeof data.text === 'string' && data.text.trim()) { text = data.text; src = 'ai'; }
+      }
+    } catch (e) { /* sem backend/sem chave: cai no fallback local */ }
+
+    if (!text) { text = localInsights(a); src = 'local'; }
+    setInsights(text); setSource(src);
     setLoading(false); setDone(true);
   };
 
@@ -1949,7 +2016,7 @@ Responda com:
         <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', flexWrap:'wrap', gap:12 }}>
           <div>
             <p style={{ ...s.label, color:C.gold }}>✨ CFO AI — Análise Inteligente</p>
-            <p style={{ ...s.muted, marginTop:4 }}>Diagnóstico, alertas, split, otimizações e plano de ação</p>
+            <p style={{ ...s.muted, marginTop:4 }}>Diagnóstico, alertas, split, otimizações e plano de ação — a partir dos seus dados reais.</p>
           </div>
           <button onClick={generate} disabled={loading} style={{ ...s.btn(loading?C.dim:C.gold), color:loading?C.muted:C.bg, cursor:loading?'not-allowed':'pointer' }}>
             {loading?'⏳ Analisando...':done?'🔄 Reanalisar':'✨ Gerar Insights'}
@@ -1962,12 +2029,27 @@ Responda com:
           <p style={{ color:C.gold, fontSize:14 }}>Analisando {a.rows.length} lançamentos...</p>
         </div>
       )}
-      {insights && !loading && <div style={s.card}>{renderMD(insights)}</div>}
+      {insights && !loading && (
+        <div style={s.card}>
+          <div style={{ display:'flex', justifyContent:'flex-end', marginBottom:4 }}>
+            <Badge
+              text={source==='ai' ? '✨ Gerado por IA (Claude) ao vivo' : '📊 Análise local dos seus dados'}
+              color={source==='ai' ? C.gold : C.blue}
+            />
+          </div>
+          {renderMD(insights)}
+          {source==='local' && (
+            <p style={{ ...s.muted, fontSize:11, marginTop:16, paddingTop:12, borderTop:`1px solid ${C.border}` }}>
+              💡 Para insights gerados pela IA da Claude, configure a variável <code style={{ color:C.gold }}>ANTHROPIC_API_KEY</code> no Vercel. Sem ela, a análise é calculada localmente a partir dos seus números.
+            </p>
+          )}
+        </div>
+      )}
       {!insights && !loading && (
         <div style={{ ...s.card, textAlign:'center', padding:48, borderStyle:'dashed' }}>
           <p style={{ fontSize:48, marginBottom:12 }}>📊</p>
           <p style={{ color:C.text, fontSize:16, marginBottom:8 }}>Análise CFO sob demanda</p>
-          <p style={s.muted}>Clique em "Gerar Insights" para análise executiva completa</p>
+          <p style={s.muted}>Clique em "Gerar Insights" para uma análise executiva completa</p>
         </div>
       )}
     </div>
@@ -2065,10 +2147,10 @@ function AtualizarTab({ onData, currentRows }) {
 const TABS = [
   { id:'overview', label:'Visão Geral', icon:'◈' },
   { id:'tabela', label:'Tabela', icon:'▦' },
+  { id:'ia', label:'IA CFO', icon:'◎' },
 ];
 const HIDDEN_TABS = [
   { id:'adicionar', label:'Adicionar', icon:'⊕' },
-  { id:'ia', label:'IA CFO', icon:'◎' },
   { id:'atualizar', label:'Atualizar', icon:'↻' },
 ];
 
