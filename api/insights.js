@@ -1,13 +1,13 @@
-// Proxy serverless (Vercel) para gerar insights com a IA da Claude.
-// A chave fica no servidor (variável de ambiente ANTHROPIC_API_KEY), nunca no
-// navegador. Se a chave não estiver configurada, responde 503 e o front-end
-// usa a análise local como fallback.
+// Proxy serverless (Vercel) para gerar insights com a IA do Google Gemini
+// (camada gratuita). A chave fica no servidor (variável de ambiente
+// GEMINI_API_KEY), nunca no navegador. Se a chave não estiver configurada,
+// responde 503 e o front-end usa a análise local como fallback.
 module.exports = async (req, res) => {
   if (req.method !== 'POST') {
     res.status(405).json({ error: 'method_not_allowed' });
     return;
   }
-  const key = process.env.ANTHROPIC_API_KEY;
+  const key = process.env.GEMINI_API_KEY;
   if (!key) {
     res.status(503).json({ error: 'no_key' });
     return;
@@ -19,17 +19,17 @@ module.exports = async (req, res) => {
       res.status(400).json({ error: 'no_prompt' });
       return;
     }
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
+    const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+    const r = await fetch(url, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        'x-api-key': key,
-        'anthropic-version': '2023-06-01',
+        'x-goog-api-key': key,
       },
       body: JSON.stringify({
-        model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
-        max_tokens: 1500,
-        messages: [{ role: 'user', content: prompt }],
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { maxOutputTokens: 1500, temperature: 0.7 },
       }),
     });
     const data = await r.json();
@@ -37,7 +37,9 @@ module.exports = async (req, res) => {
       res.status(r.status).json({ error: (data && data.error && data.error.message) || 'api_error' });
       return;
     }
-    const text = (data.content || []).map(b => b.text || '').join('');
+    const text = (((data.candidates || [])[0] || {}).content || {}).parts
+      ? data.candidates[0].content.parts.map(p => p.text || '').join('')
+      : '';
     res.status(200).json({ text });
   } catch (e) {
     res.status(500).json({ error: String((e && e.message) || e) });
