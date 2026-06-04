@@ -36,12 +36,17 @@ module.exports = async (req, res) => {
 
     for (const model of models) {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+      // maxOutputTokens generoso para a resposta não ser cortada. Nos modelos
+      // 2.5 (que usam "thinking" e consomem o orçamento de tokens antes de
+      // escrever), desliga o thinking para garantir a resposta completa.
+      const genConfig = { maxOutputTokens: 4096, temperature: 0.7 };
+      if (model.includes('2.5')) genConfig.thinkingConfig = { thinkingBudget: 0 };
       const r = await fetch(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-goog-api-key': key },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { maxOutputTokens: 1500, temperature: 0.7 },
+          generationConfig: genConfig,
         }),
       });
       const data = await r.json().catch(() => null);
