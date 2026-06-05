@@ -244,43 +244,49 @@ function saveLocalData(payload) {
   try { if (window?.storage) window.storage.set(STORAGE_KEY, payload); } catch(e) {}
 }
 
-async function loadData() {
-  // 1) Tenta o servidor (banco na nuvem) — é a fonte da verdade.
-  let serverData = null;
-  let serverReachable = false;
+// Busca os dados na nuvem. Retorna { reachable, data, updatedAt }.
+async function fetchCloudData() {
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 8000); // não trava se a rede cair
-    const r = await fetch(API_DATA, { signal: ctrl.signal });
+    const r = await fetch(API_DATA, { signal: ctrl.signal, cache: 'no-store' });
     clearTimeout(t);
     if (r.ok) {
-      serverReachable = true;
       const j = await r.json().catch(() => null);
-      if (j && Array.isArray(j.data)) serverData = j.data;
+      return { reachable: true, data: j && Array.isArray(j.data) ? j.data : null, updatedAt: j ? (j.updatedAt || null) : null };
     }
-    // 503 (banco ainda não configurado) ou erro: serverReachable fica false.
+    // 503 (banco não configurado) ou erro: tratamos como indisponível.
   } catch (e) { /* offline ou /api indisponível */ }
+  return { reachable: false, data: null, updatedAt: null };
+}
 
-  if (serverData && serverData.length) {
-    saveLocalData(JSON.stringify(serverData)); // atualiza o cache
-    return serverData;
+// Carrega o estado inicial. Retorna { data, updatedAt, source } onde source é
+// 'cloud' | 'local' | 'initial'.
+async function loadData() {
+  const cloud = await fetchCloudData();
+
+  if (cloud.data && cloud.data.length) {
+    saveLocalData(JSON.stringify(cloud.data)); // atualiza o cache
+    return { data: cloud.data, updatedAt: cloud.updatedAt, source: 'cloud' };
   }
 
-  // 2) Servidor vazio ou indisponível → usa o cache local; se não houver, a
-  //    semente inicial. Mantém os lançamentos visíveis mesmo sem banco.
+  // Servidor vazio ou indisponível → cache local; se não houver, a amostra.
   const local = await loadLocalData();
   const hasLocal = Array.isArray(local) && local.length > 0;
-  const fallback = hasLocal ? local : INITIAL;
 
-  // 3) Migração: se o servidor respondeu OK porém vazio E existem dados reais
-  //    locais, sobe-os para a nuvem (é assim que seus lançamentos atuais migram
-  //    na primeira abertura — abra primeiro no aparelho que tem os dados).
-  //    Nunca semeia a base com a amostra inicial, para não sobrescrever dados
-  //    reais ao abrir num aparelho novo/sem cache.
-  if (serverReachable && hasLocal && (!serverData || !serverData.length)) {
+  // Migração: se a nuvem está acessível porém vazia E há dados reais locais,
+  // sobe-os (abra primeiro no aparelho que tem os dados). Nunca semeia com a
+  // amostra inicial, para não sobrescrever dados reais num aparelho novo.
+  if (cloud.reachable && hasLocal && (!cloud.data || !cloud.data.length)) {
     saveData(local).catch(() => {});
+    return { data: local, updatedAt: null, source: 'cloud' };
   }
-  return fallback;
+
+  return {
+    data: hasLocal ? local : INITIAL,
+    updatedAt: null,
+    source: hasLocal ? 'local' : 'initial',
+  };
 }
 
 // Salva no servidor (fonte da verdade) e atualiza o cache local. Lança erro se
@@ -1794,6 +1800,11 @@ export default function App() {
   const [saveStatus, setSaveStatus] = useState('clean');
   const [saveErrorMsg, setSaveErrorMsg] = useState('');
 
+  // Sincronização com a nuvem (multi-aparelho).
+  const [lastSyncAt, setLastSyncAt] = useState(null);     // ms do último load/atualização vindo da nuvem
+  const [cloudUpdatedAt, setCloudUpdatedAt] = useState(null); // updated_at do servidor (detecta mudança)
+  const [reloading, setReloading] = useState(false);
+
   // Mês atual dinâmico (timezone do navegador, esperado America/Sao_Paulo).
   const currentMonth = useMemo(() => new Date().getMonth(), []);
   const currentMonthLabel = useMemo(() => getCurrentMonthLabel(), []);
@@ -1846,7 +1857,12 @@ export default function App() {
   }, [hidePreviousMonths, selectedMonth, currentMonth]);
 
   useEffect(() => {
-    loadData().then(d => { setData(d); setLoaded(true); });
+    loadData().then(res => {
+      setData(res.data);
+      setCloudUpdatedAt(res.updatedAt);
+      if (res.source === 'cloud') setLastSyncAt(Date.now());
+      setLoaded(true);
+    });
     const style = document.createElement('style');
     style.textContent = `
       * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1885,6 +1901,8 @@ export default function App() {
     try {
       await saveData(dataRef.current);            // grava na nuvem + cache local
       setSaveErrorMsg('');
+      setLastSyncAt(Date.now());
+      setCloudUpdatedAt(null); // força reconciliar no próximo foco
       setSaveStatus('savedCloud');
       setTimeout(() => setSaveStatus(s => (s === 'savedCloud' ? 'clean' : s)), 2500);
     } catch (e) {
@@ -1919,10 +1937,64 @@ export default function App() {
     return () => window.removeEventListener('beforeunload', handler);
   }, [saveStatus]);
 
+  // Recarrega da nuvem (descarta alterações locais não salvas, com confirmação).
+  const reloadFromCloud = useCallback(async () => {
+    const unsaved = saveStatus === 'dirty' || saveStatus === 'error';
+    if (unsaved && !window.confirm('Há alterações não salvas neste aparelho. Recarregar da nuvem vai descartá-las. Continuar?')) return;
+    setReloading(true);
+    try {
+      const res = await loadData();
+      setData(res.data);
+      setCloudUpdatedAt(res.updatedAt);
+      if (res.source === 'cloud') setLastSyncAt(Date.now());
+      setSaveStatus('clean');
+    } finally {
+      setReloading(false);
+    }
+  }, [saveStatus]);
+
+  // Atualiza ao voltar o foco/visibilidade, se não houver edição pendente e a
+  // nuvem tiver versão mais nova (outro aparelho salvou) — evita conflito.
+  const saveStatusRef = useRef(saveStatus);
+  useEffect(() => { saveStatusRef.current = saveStatus; }, [saveStatus]);
+  const cloudUpdatedAtRef = useRef(cloudUpdatedAt);
+  useEffect(() => { cloudUpdatedAtRef.current = cloudUpdatedAt; }, [cloudUpdatedAt]);
+
+  useEffect(() => {
+    const onVisible = async () => {
+      if (document.visibilityState !== 'visible') return;
+      const st = saveStatusRef.current;
+      if (st !== 'clean' && st !== 'savedCloud') return; // não mexe se há edição pendente
+      const cloud = await fetchCloudData();
+      if (cloud.data && cloud.data.length && cloud.updatedAt && cloud.updatedAt !== cloudUpdatedAtRef.current) {
+        setData(cloud.data);
+        saveLocalData(JSON.stringify(cloud.data));
+        setCloudUpdatedAt(cloud.updatedAt);
+        setLastSyncAt(Date.now());
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
+
   const showViewToggle = MONTHLY_TABS.includes(tab);
 
   // Saldo a liquidar (anual, considerando meses liquidados) para exibição no header.
   const pending = useMemo(() => pendingSettlement(a.monthly, paidMonths), [a.monthly, paidMonths]);
+
+  // Tela de carregando — evita piscar a amostra inicial antes de vir da nuvem.
+  if (!loaded) {
+    return (
+      <div style={{ background:C.bg, minHeight:'100vh', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:14, color:C.muted }}>
+        <div style={{ fontSize:34 }}>☁︎</div>
+        <p style={{ fontSize:14, letterSpacing:1 }}>Carregando seus dados…</p>
+        <div style={{ width:120, height:3, borderRadius:2, overflow:'hidden', background:C.dim }}>
+          <div style={{ width:'40%', height:'100%', background:C.gold, animation:'bgload 1s ease-in-out infinite' }} />
+        </div>
+        <style>{`@keyframes bgload{0%{margin-left:-40%}100%{margin-left:100%}}`}</style>
+      </div>
+    );
+  }
 
   return (
     <HideCtx.Provider value={hideBalances}>
@@ -1959,8 +2031,19 @@ export default function App() {
                 <span style={{ fontSize:12, color:C.gold, fontWeight:600 }}>{currentMonthLabel}</span>
               </div>
             </div>
-            <div style={{ display:'flex', alignItems:'center', gap:12, flexWrap:'wrap', justifyContent:'space-between', flex: isMobile ? '1 1 100%' : '0 0 auto' }}>
-              <SaveButton status={saveStatus} onSave={handleSave} />
+            <div style={{ display:'flex', alignItems:'center', gap:10, flexWrap:'wrap', justifyContent:'space-between', flex: isMobile ? '1 1 100%' : '0 0 auto' }}>
+              <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                <SaveButton status={saveStatus} onSave={handleSave} />
+                <button
+                  onClick={reloadFromCloud}
+                  disabled={reloading}
+                  aria-label="Recarregar da nuvem"
+                  title={lastSyncAt ? `Sincronizado às ${new Date(lastSyncAt).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})} — toque para recarregar da nuvem` : 'Recarregar da nuvem'}
+                  style={{ background:'transparent', color:C.muted, border:`1px solid ${C.border}`, borderRadius:26, padding:'8px 12px', fontSize:14, cursor:reloading?'default':'pointer', minHeight:40, display:'inline-flex', alignItems:'center' }}
+                >
+                  {reloading ? '⏳' : '↻'}
+                </button>
+              </div>
               <HideBalancesToggle hide={hideBalances} onChange={toggleHideBalance} />
               <div style={{ textAlign:'right' }}>
                 <p style={{ fontSize:10, color:C.muted, letterSpacing:1, textTransform:'uppercase' }}>Saldo a Liquidar</p>

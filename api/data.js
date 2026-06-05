@@ -49,7 +49,7 @@ module.exports = async (req, res) => {
   try {
     if (req.method === 'GET') {
       const r = await fetch(
-        `${base}?id=eq.${ROW_ID}&select=data`,
+        `${base}?id=eq.${ROW_ID}&select=data,updated_at`,
         { headers: authHeaders }
       );
       if (!r.ok) {
@@ -58,8 +58,8 @@ module.exports = async (req, res) => {
         return;
       }
       const rows = await r.json().catch(() => []);
-      const data = Array.isArray(rows) && rows[0] ? rows[0].data : null;
-      res.status(200).json({ data });
+      const row = Array.isArray(rows) && rows[0] ? rows[0] : null;
+      res.status(200).json({ data: row ? row.data : null, updatedAt: row ? row.updated_at : null });
       return;
     }
 
