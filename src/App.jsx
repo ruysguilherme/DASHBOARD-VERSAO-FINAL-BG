@@ -1779,11 +1779,11 @@ function AtualizarTab({ onData, currentRows }) {
 // ─── TABS CONFIG ───
 const TABS = [
   { id:'overview', label:'Visão Geral', icon:'◈' },
-  { id:'tabela', label:'Tabela', icon:'▦' },
   { id:'ia', label:'Análise CFO', icon:'◎' },
 ];
 const HIDDEN_TABS = [
   { id:'adicionar', label:'Adicionar', icon:'⊕' },
+  { id:'tabela', label:'Tabela', icon:'▦' },
   { id:'atualizar', label:'Atualizar', icon:'↻' },
 ];
 
