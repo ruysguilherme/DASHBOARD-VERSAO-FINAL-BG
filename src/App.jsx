@@ -310,7 +310,7 @@ async function saveData(data) {
   });
   if (!r.ok) {
     let err = `HTTP ${r.status}`;
-    try { const j = await r.json(); if (j && j.error) err = j.error; } catch(e) {}
+    try { const j = await r.json(); if (j) err = [j.error, j.detail].filter(Boolean).join(' — ') || err; } catch(e) {}
     throw new Error(err);
   }
 }
@@ -2233,6 +2233,7 @@ export default function App() {
   // Estado do salvamento automático na nuvem.
   // clean | dirty | saving | savedCloud | savedLocal | error
   const [saveStatus, setSaveStatus] = useState('clean');
+  const [saveErrorMsg, setSaveErrorMsg] = useState('');
 
   // Mês atual dinâmico (timezone do navegador, esperado America/Sao_Paulo).
   const currentMonth = useMemo(() => new Date().getMonth(), []);
@@ -2324,15 +2325,18 @@ export default function App() {
     setSaveStatus('saving');
     try {
       await saveData(dataRef.current);            // grava na nuvem + cache local
+      setSaveErrorMsg('');
       setSaveStatus('savedCloud');
       setTimeout(() => setSaveStatus(s => (s === 'savedCloud' ? 'clean' : s)), 2500);
     } catch (e) {
       // O cache local já foi gravado por saveData (nada se perde). Diferencia
       // "banco ainda não configurado" (503/no_db) de uma falha real.
       if (String(e && e.message) === 'no_db') {
+        setSaveErrorMsg('');
         setSaveStatus('savedLocal');
         setTimeout(() => setSaveStatus(s => (s === 'savedLocal' ? 'clean' : s)), 3000);
       } else {
+        setSaveErrorMsg(String((e && e.message) || e));
         setSaveStatus('error');
       }
     }
@@ -2462,6 +2466,15 @@ export default function App() {
               )}
             </div>
           </div>
+
+          {/* ─── BANNER DE ERRO DE SALVAMENTO ─── */}
+          {saveStatus === 'error' && saveErrorMsg && (
+            <div style={{ background:C.redDim, borderBottom:`1px solid ${C.red}`, padding:'10px 16px', display:'flex', gap:10, alignItems:'flex-start', flexWrap:'wrap' }}>
+              <span style={{ color:C.red, fontSize:12, fontWeight:700, whiteSpace:'nowrap' }}>⚠️ Falha ao salvar na nuvem:</span>
+              <span style={{ color:C.text, fontSize:12, fontFamily:'monospace', wordBreak:'break-word', flex:1, minWidth:0 }}>{saveErrorMsg}</span>
+              <button onClick={handleSave} style={{ ...s.btnGhost, padding:'4px 10px', fontSize:11, borderColor:C.red, color:C.red }}>↻ Tentar de novo</button>
+            </div>
+          )}
 
           {/* ─── CONTENT ─── */}
           <div style={{ padding: isMobile ? '14px 12px 32px' : '20px', maxWidth:1280, margin:'0 auto' }}>
