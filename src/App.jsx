@@ -825,19 +825,27 @@ function ReconciliationPanel({ rows, monthIdx, isMobile, onChange }) {
       if (valById[r.id] === undefined) return r;
       const nm = [...r.m];
       nm[monthIdx] = valById[r.id];
-      return { ...r, m: nm, total: nm.reduce((s,v) => s + v, 0) };
+      // valor (mês atual) + tipo/categoria/pagador (compra inteira)
+      return { ...r, t: edit.t, c: edit.c, p: edit.payer, m: nm, total: nm.reduce((s,v) => s + v, 0) };
     });
     onChange(next);
     setEdit(null);
   };
 
-  const startEdit = item => setEdit({ key:item.key, value:String(item.total.toFixed(2)).replace('.', ',') });
+  const deleteItem = item => {
+    if (!window.confirm(`Excluir "${item.d}"? Isso remove a despesa inteira (todos os meses e ambas as pessoas).`)) return;
+    const ids = new Set(item.parts.map(p => p.id));
+    onChange(rows.filter(r => !ids.has(r.id)));
+    setEdit(null);
+  };
+
+  const startEdit = item => setEdit({ key:item.key, value:String(item.total.toFixed(2)).replace('.', ','), t:item.t, c:item.c, payer });
 
   return (
     <div style={{ ...s.card, marginBottom:16, border:`1px solid ${C.gold}40`, background:`linear-gradient(135deg, ${C.card}, #0A1E35)` }}>
       <p style={{ ...s.label, color:C.gold, marginBottom:4 }}>🧾 Conferência de Fatura</p>
       <p style={{ ...s.muted, fontSize:12, marginBottom:14, lineHeight:1.5 }}>
-        Confira o total contra a fatura/extrato e veja o split de cada compra. Toque no valor para corrigir — a alteração é salva e aparece na Tabela.
+        Confira o total contra a fatura/extrato e veja o split de cada compra. Toque no valor para corrigir valor, tipo, categoria, quem pagou ou excluir — tudo salvo e refletido na Tabela.
       </p>
 
       <div style={{ display:'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap:12, marginBottom:16 }}>
@@ -904,23 +912,40 @@ function ReconciliationPanel({ rows, monthIdx, isMobile, onChange }) {
 
                 {editing && (
                   <div style={{ marginTop:10, paddingTop:10, borderTop:`1px dashed ${C.border}` }}>
-                    <div style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
+                    <div style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap', marginBottom:10 }}>
                       <span style={{ fontSize:13, color:C.muted, fontFamily:'monospace' }}>R$</span>
                       <input
                         autoFocus
                         type="text"
                         inputMode="decimal"
                         value={edit.value}
-                        onChange={e => setEdit({ key:it.key, value:e.target.value })}
+                        onChange={e => setEdit({ ...edit, value:e.target.value })}
                         onKeyDown={e => { if (e.key === 'Enter') applyEdit(it); if (e.key === 'Escape') setEdit(null); }}
                         style={{ ...s.input, flex:'1 1 120px', width:'auto', minHeight:44, fontFamily:'monospace' }}
                         placeholder="0,00"
                       />
-                      <button onClick={() => applyEdit(it)} style={{ ...s.btn(C.green), minHeight:44 }} aria-label="Salvar valor">✓ Salvar</button>
-                      <button onClick={() => setEdit(null)} style={{ ...s.btnGhost, minHeight:44 }} aria-label="Cancelar edição">✕</button>
                     </div>
-                    <p style={{ ...s.muted, fontSize:11, marginTop:6 }}>
-                      O valor será rateado proporcionalmente entre Guilherme e Bruna e salvo na Tabela.
+                    <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))', gap:10, marginBottom:10 }}>
+                      <div>
+                        <label style={{ ...s.label, display:'block', marginBottom:4 }}>Tipo</label>
+                        <select style={s.input} value={edit.t} onChange={e=>setEdit({ ...edit, t:e.target.value })}>{TIPOS.map(t=><option key={t} value={t}>{t}</option>)}</select>
+                      </div>
+                      <div>
+                        <label style={{ ...s.label, display:'block', marginBottom:4 }}>Categoria</label>
+                        <select style={s.input} value={edit.c} onChange={e=>setEdit({ ...edit, c:e.target.value })}>{[...new Set([...CATEGORIAS, edit.c])].map(c=><option key={c} value={c}>{c}</option>)}</select>
+                      </div>
+                      <div>
+                        <label style={{ ...s.label, display:'block', marginBottom:4 }}>Quem pagou</label>
+                        <select style={s.input} value={edit.payer} onChange={e=>setEdit({ ...edit, payer:e.target.value })}>{PESSOAS.map(p=><option key={p} value={p}>{p}</option>)}</select>
+                      </div>
+                    </div>
+                    <div style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'center' }}>
+                      <button onClick={() => applyEdit(it)} style={{ ...s.btn(C.green), minHeight:44 }} aria-label="Salvar">✓ Salvar</button>
+                      <button onClick={() => setEdit(null)} style={{ ...s.btnGhost, minHeight:44 }} aria-label="Cancelar edição">✕ Cancelar</button>
+                      <button onClick={() => deleteItem(it)} style={{ ...s.btnGhost, minHeight:44, borderColor:C.red, color:C.red, marginLeft:'auto' }} aria-label={`Excluir ${it.d}`}>🗑 Excluir</button>
+                    </div>
+                    <p style={{ ...s.muted, fontSize:11, marginTop:8 }}>
+                      O valor é rateado proporcionalmente entre as pessoas (mês atual); tipo, categoria e quem pagou valem para a compra toda. Salvo na Tabela.
                     </p>
                   </div>
                 )}
