@@ -20,13 +20,17 @@ const ROW_ID = 'expenses';
 const TABLE = 'app_state';
 
 function getConfig() {
-  const url = process.env.SUPABASE_URL;
+  let url = process.env.SUPABASE_URL;
   const key =
     process.env.SUPABASE_SERVICE_ROLE_KEY ||
     process.env.SUPABASE_SERVICE_KEY ||
     process.env.SUPABASE_KEY;
   if (!url || !key) return null;
-  return { url: url.replace(/\/+$/, ''), key };
+  // Normaliza para apenas o domínio (origin), tolerando valores colados com
+  // caminho a mais (ex.: ".../rest/v1") ou barra final — evita montar uma URL
+  // inválida como /rest/v1/rest/v1/... (erro PGRST125).
+  try { url = new URL(url.trim()).origin; } catch (e) { url = url.trim().replace(/\/+$/, ''); }
+  return { url, key };
 }
 
 module.exports = async (req, res) => {
