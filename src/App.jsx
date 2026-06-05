@@ -41,7 +41,7 @@ const CAT_C = {
 };
 const TYPE_C = { 'Caixa':C.blue, 'Cartão de Crédito':C.gold };
 
-const YEAR = 2026;
+const YEAR = new Date().getFullYear();
 const HIDDEN_TOKEN = 'R$ ••••••';
 
 // Default liquidated months for 2026: Feb (1), Mar (2), Apr (3)
@@ -101,20 +101,6 @@ function useIsMobile(breakpoint = 640) {
     };
   }, [query]);
   return isMobile;
-}
-
-function getMonthData(rows, monthIdx) {
-  return rows.map(r => ({ ...r, monthVal: r.m[monthIdx] || 0 })).filter(r => r.monthVal > 0);
-}
-
-function calculateSettlement(rows, monthIdx) {
-  const slice = monthIdx !== null
-    ? rows.map(r => ({ ...r, total: r.m[monthIdx] || 0 }))
-    : rows;
-  const g2b = slice.filter(r=>r.q==='Guilherme'&&r.p==='Bruna').reduce((s,r)=>s+r.total,0);
-  const b2g = slice.filter(r=>r.q==='Bruna'&&r.p==='Guilherme').reduce((s,r)=>s+r.total,0);
-  const net = g2b - b2g;
-  return { g2b, b2g, net, direction: net>0.01?'g2b':net<-0.01?'b2g':'zero' };
 }
 
 function filterTransactions(rows, { person, paymentMethod, category }) {
@@ -258,43 +244,49 @@ function saveLocalData(payload) {
   try { if (window?.storage) window.storage.set(STORAGE_KEY, payload); } catch(e) {}
 }
 
-async function loadData() {
-  // 1) Tenta o servidor (banco na nuvem) — é a fonte da verdade.
-  let serverData = null;
-  let serverReachable = false;
+// Busca os dados na nuvem. Retorna { reachable, data, updatedAt }.
+async function fetchCloudData() {
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 8000); // não trava se a rede cair
-    const r = await fetch(API_DATA, { signal: ctrl.signal });
+    const r = await fetch(API_DATA, { signal: ctrl.signal, cache: 'no-store' });
     clearTimeout(t);
     if (r.ok) {
-      serverReachable = true;
       const j = await r.json().catch(() => null);
-      if (j && Array.isArray(j.data)) serverData = j.data;
+      return { reachable: true, data: j && Array.isArray(j.data) ? j.data : null, updatedAt: j ? (j.updatedAt || null) : null };
     }
-    // 503 (banco ainda não configurado) ou erro: serverReachable fica false.
+    // 503 (banco não configurado) ou erro: tratamos como indisponível.
   } catch (e) { /* offline ou /api indisponível */ }
+  return { reachable: false, data: null, updatedAt: null };
+}
 
-  if (serverData && serverData.length) {
-    saveLocalData(JSON.stringify(serverData)); // atualiza o cache
-    return serverData;
+// Carrega o estado inicial. Retorna { data, updatedAt, source } onde source é
+// 'cloud' | 'local' | 'initial'.
+async function loadData() {
+  const cloud = await fetchCloudData();
+
+  if (cloud.data && cloud.data.length) {
+    saveLocalData(JSON.stringify(cloud.data)); // atualiza o cache
+    return { data: cloud.data, updatedAt: cloud.updatedAt, source: 'cloud' };
   }
 
-  // 2) Servidor vazio ou indisponível → usa o cache local; se não houver, a
-  //    semente inicial. Mantém os lançamentos visíveis mesmo sem banco.
+  // Servidor vazio ou indisponível → cache local; se não houver, a amostra.
   const local = await loadLocalData();
   const hasLocal = Array.isArray(local) && local.length > 0;
-  const fallback = hasLocal ? local : INITIAL;
 
-  // 3) Migração: se o servidor respondeu OK porém vazio E existem dados reais
-  //    locais, sobe-os para a nuvem (é assim que seus lançamentos atuais migram
-  //    na primeira abertura — abra primeiro no aparelho que tem os dados).
-  //    Nunca semeia a base com a amostra inicial, para não sobrescrever dados
-  //    reais ao abrir num aparelho novo/sem cache.
-  if (serverReachable && hasLocal && (!serverData || !serverData.length)) {
+  // Migração: se a nuvem está acessível porém vazia E há dados reais locais,
+  // sobe-os (abra primeiro no aparelho que tem os dados). Nunca semeia com a
+  // amostra inicial, para não sobrescrever dados reais num aparelho novo.
+  if (cloud.reachable && hasLocal && (!cloud.data || !cloud.data.length)) {
     saveData(local).catch(() => {});
+    return { data: local, updatedAt: null, source: 'cloud' };
   }
-  return fallback;
+
+  return {
+    data: hasLocal ? local : INITIAL,
+    updatedAt: null,
+    source: hasLocal ? 'local' : 'initial',
+  };
 }
 
 // Salva no servidor (fonte da verdade) e atualiza o cache local. Lança erro se
@@ -839,19 +831,27 @@ function ReconciliationPanel({ rows, monthIdx, isMobile, onChange }) {
       if (valById[r.id] === undefined) return r;
       const nm = [...r.m];
       nm[monthIdx] = valById[r.id];
-      return { ...r, m: nm, total: nm.reduce((s,v) => s + v, 0) };
+      // valor (mês atual) + tipo/categoria/pagador (compra inteira)
+      return { ...r, t: edit.t, c: edit.c, p: edit.payer, m: nm, total: nm.reduce((s,v) => s + v, 0) };
     });
     onChange(next);
     setEdit(null);
   };
 
-  const startEdit = item => setEdit({ key:item.key, value:String(item.total.toFixed(2)).replace('.', ',') });
+  const deleteItem = item => {
+    if (!window.confirm(`Excluir "${item.d}"? Isso remove a despesa inteira (todos os meses e ambas as pessoas).`)) return;
+    const ids = new Set(item.parts.map(p => p.id));
+    onChange(rows.filter(r => !ids.has(r.id)));
+    setEdit(null);
+  };
+
+  const startEdit = item => setEdit({ key:item.key, value:String(item.total.toFixed(2)).replace('.', ','), t:item.t, c:item.c, payer });
 
   return (
     <div style={{ ...s.card, marginBottom:16, border:`1px solid ${C.gold}40`, background:`linear-gradient(135deg, ${C.card}, #0A1E35)` }}>
       <p style={{ ...s.label, color:C.gold, marginBottom:4 }}>🧾 Conferência de Fatura</p>
       <p style={{ ...s.muted, fontSize:12, marginBottom:14, lineHeight:1.5 }}>
-        Confira o total contra a fatura/extrato e veja o split de cada compra. Toque no valor para corrigir — a alteração é salva e aparece na Tabela.
+        Confira o total contra a fatura/extrato e veja o split de cada compra. Toque no valor para corrigir valor, tipo, categoria, quem pagou ou excluir — tudo salvo e refletido na Tabela.
       </p>
 
       <div style={{ display:'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap:12, marginBottom:16 }}>
@@ -918,23 +918,40 @@ function ReconciliationPanel({ rows, monthIdx, isMobile, onChange }) {
 
                 {editing && (
                   <div style={{ marginTop:10, paddingTop:10, borderTop:`1px dashed ${C.border}` }}>
-                    <div style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
+                    <div style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap', marginBottom:10 }}>
                       <span style={{ fontSize:13, color:C.muted, fontFamily:'monospace' }}>R$</span>
                       <input
                         autoFocus
                         type="text"
                         inputMode="decimal"
                         value={edit.value}
-                        onChange={e => setEdit({ key:it.key, value:e.target.value })}
+                        onChange={e => setEdit({ ...edit, value:e.target.value })}
                         onKeyDown={e => { if (e.key === 'Enter') applyEdit(it); if (e.key === 'Escape') setEdit(null); }}
                         style={{ ...s.input, flex:'1 1 120px', width:'auto', minHeight:44, fontFamily:'monospace' }}
                         placeholder="0,00"
                       />
-                      <button onClick={() => applyEdit(it)} style={{ ...s.btn(C.green), minHeight:44 }} aria-label="Salvar valor">✓ Salvar</button>
-                      <button onClick={() => setEdit(null)} style={{ ...s.btnGhost, minHeight:44 }} aria-label="Cancelar edição">✕</button>
                     </div>
-                    <p style={{ ...s.muted, fontSize:11, marginTop:6 }}>
-                      O valor será rateado proporcionalmente entre Guilherme e Bruna e salvo na Tabela.
+                    <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))', gap:10, marginBottom:10 }}>
+                      <div>
+                        <label style={{ ...s.label, display:'block', marginBottom:4 }}>Tipo</label>
+                        <select style={s.input} value={edit.t} onChange={e=>setEdit({ ...edit, t:e.target.value })}>{TIPOS.map(t=><option key={t} value={t}>{t}</option>)}</select>
+                      </div>
+                      <div>
+                        <label style={{ ...s.label, display:'block', marginBottom:4 }}>Categoria</label>
+                        <select style={s.input} value={edit.c} onChange={e=>setEdit({ ...edit, c:e.target.value })}>{[...new Set([...CATEGORIAS, edit.c])].map(c=><option key={c} value={c}>{c}</option>)}</select>
+                      </div>
+                      <div>
+                        <label style={{ ...s.label, display:'block', marginBottom:4 }}>Quem pagou</label>
+                        <select style={s.input} value={edit.payer} onChange={e=>setEdit({ ...edit, payer:e.target.value })}>{PESSOAS.map(p=><option key={p} value={p}>{p}</option>)}</select>
+                      </div>
+                    </div>
+                    <div style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'center' }}>
+                      <button onClick={() => applyEdit(it)} style={{ ...s.btn(C.green), minHeight:44 }} aria-label="Salvar">✓ Salvar</button>
+                      <button onClick={() => setEdit(null)} style={{ ...s.btnGhost, minHeight:44 }} aria-label="Cancelar edição">✕ Cancelar</button>
+                      <button onClick={() => deleteItem(it)} style={{ ...s.btnGhost, minHeight:44, borderColor:C.red, color:C.red, marginLeft:'auto' }} aria-label={`Excluir ${it.d}`}>🗑 Excluir</button>
+                    </div>
+                    <p style={{ ...s.muted, fontSize:11, marginTop:8 }}>
+                      O valor é rateado proporcionalmente entre as pessoas (mês atual); tipo, categoria e quem pagou valem para a compra toda. Salvo na Tabela.
                     </p>
                   </div>
                 )}
@@ -1164,567 +1181,62 @@ function OverviewTab({ a, viewMode, selectedMonth, filters, currentMonth, onNavi
   );
 }
 
-// ─── TAB: ENCONTRO MENSAL ───
-function EncontroTab({ a, viewMode, selectedMonth, currentMonth }) {
-  const hide = useHideBalances();
-  const { paidMonths } = usePaidMonths();
-
-  if (viewMode === 'monthly') {
-    const mData = a.monthly[selectedMonth];
-    const isPaid = !!paidMonths[selectedMonth];
-    if (mData.total === 0) return (
-      <div style={{ ...s.card, textAlign:'center', padding:48 }}>
-        <p style={{ fontSize:32, marginBottom:12 }}>📭</p>
-        <p style={{ color:C.muted }}>Sem lançamentos em {mData.mes}.</p>
-      </div>
-    );
-
-    const dirColor = mData.direction==='g2b'?C.red:mData.direction==='b2g'?C.green:C.muted;
-    const dirText = mData.direction==='g2b'?'Guilherme deve transferir para Bruna':mData.direction==='b2g'?'Bruna deve transferir para Guilherme':'Zerado';
-    const effectiveG = isPaid ? 0 : mData.gOwesB;
-    const effectiveB = isPaid ? 0 : mData.bOwesG;
-    const effectiveNet = isPaid ? 0 : mData.net;
-
-    return (
-      <div>
-        <MonthlySummaryBanner mData={mData} rows={a.rows} currentMonth={currentMonth} />
-
-        <div style={{ ...s.card, background:`linear-gradient(135deg, ${C.card}, #0a2040)`, border:`1px solid ${isPaid ? C.green : C.gold}55`, marginBottom:20 }}>
-          <p style={{ ...s.label, color:isPaid?C.green:C.gold, marginBottom:12 }}>
-            {isPaid ? '✓ Encontro de Contas — Liquidado' : '⚖️ Encontro de Contas'} — {mData.mes} {YEAR}
-          </p>
-          <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))', gap:16 }}>
-            <div style={{ background:C.redDim, border:`1px solid ${C.red}40`, borderRadius:10, padding:'14px 16px' }}>
-              <p style={{ ...s.muted, fontSize:11, marginBottom:4 }}>Guilherme a pagar (à Bruna)</p>
-              <p style={{ fontSize:22, fontFamily:'monospace', color:C.red, fontWeight:700 }}>{maskFmt(effectiveG, hide)}</p>
-            </div>
-            <div style={{ background:C.greenDim, border:`1px solid ${C.green}40`, borderRadius:10, padding:'14px 16px' }}>
-              <p style={{ ...s.muted, fontSize:11, marginBottom:4 }}>Bruna a pagar (ao Guilherme)</p>
-              <p style={{ fontSize:22, fontFamily:'monospace', color:C.green, fontWeight:700 }}>{maskFmt(effectiveB, hide)}</p>
-            </div>
-            <div style={{ background:`${isPaid?C.green:dirColor}15`, border:`1px solid ${isPaid?C.green:dirColor}40`, borderRadius:10, padding:'14px 16px' }}>
-              <p style={{ ...s.muted, fontSize:11, marginBottom:4 }}>💳 Transferência Líquida</p>
-              <p style={{ fontSize:26, fontFamily:'monospace', color:isPaid?C.green:dirColor, fontWeight:700 }}>{maskFmt(Math.abs(effectiveNet), hide)}</p>
-              <p style={{ fontSize:11, color:isPaid?C.green:dirColor, marginTop:4, fontWeight:600 }}>{isPaid ? '✓ Liquidado' : dirText}</p>
-            </div>
-          </div>
-        </div>
-
-        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))', gap:12, marginBottom:20 }}>
-          <div style={s.cardSm}>
-            <p style={s.label}>Total no Mês</p>
-            <p style={{ fontSize:20, fontFamily:'monospace', color:C.text, marginTop:4 }}>{maskFmt(mData.total, hide)}</p>
-          </div>
-          <div style={s.cardSm}>
-            <p style={s.label}>Guilherme pagou</p>
-            <p style={{ fontSize:20, fontFamily:'monospace', color:C.blue, marginTop:4 }}>{maskFmt(mData.Guilherme, hide)}</p>
-            <p style={{ fontSize:11, color:C.muted, marginTop:2 }}>{pct(mData.Guilherme,mData.total)} do total</p>
-          </div>
-          <div style={s.cardSm}>
-            <p style={s.label}>Bruna pagou</p>
-            <p style={{ fontSize:20, fontFamily:'monospace', color:C.amber, marginTop:4 }}>{maskFmt(mData.Bruna, hide)}</p>
-            <p style={{ fontSize:11, color:C.muted, marginTop:2 }}>{pct(mData.Bruna,mData.total)} do total</p>
-          </div>
-        </div>
-
-        {mData.topCats?.length > 0 && (
-          <div style={s.card}>
-            <p style={{ ...s.label, marginBottom:12 }}>Top Categorias</p>
-            {mData.topCats.map(([cat,val]) => (
-              <div key={cat} style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'8px 0', borderBottom:`1px solid ${C.border}` }}>
-                <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-                  <div style={{ width:3, height:32, borderRadius:2, background:CAT_C[cat]||C.muted }}/>
-                  <div>
-                    <p style={{ fontSize:13, color:C.text }}>{cat}</p>
-                    <p style={{ fontSize:11, color:C.muted }}>{pct(val,mData.total)}</p>
-                  </div>
-                </div>
-                <p style={{ fontSize:14, fontFamily:'monospace', color:CAT_C[cat]||C.text }}>{maskFmt(val, hide)}</p>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  // Visão anual: total a liquidar exclui meses já liquidados
-  const pending = pendingSettlement(a.monthly, paidMonths);
-  const months = a.monthly.filter(m => m.gOwesB > 0 || m.bOwesG > 0);
-
-  return (
-    <div>
-      <div style={{ ...s.card, marginBottom:20, background:`linear-gradient(135deg, ${C.card}, ${C.panel})`, border:`1px solid ${C.gold}55` }}>
-        <p style={{ ...s.label, color:C.gold, marginBottom:12 }}>⚖️ Encontro de Contas — Resumo Anual {YEAR}</p>
-        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))', gap:20 }}>
-          <div>
-            <p style={s.muted}>Guilherme a pagar (pendente)</p>
-            <p style={{ fontSize:24, fontFamily:'monospace', color:C.red, fontWeight:700, marginTop:4 }}>{maskFmt(pending.g2b, hide)}</p>
-          </div>
-          <div>
-            <p style={s.muted}>Bruna a pagar (pendente)</p>
-            <p style={{ fontSize:24, fontFamily:'monospace', color:C.green, fontWeight:700, marginTop:4 }}>{maskFmt(pending.b2g, hide)}</p>
-          </div>
-          <div style={{ borderLeft:`1px solid ${C.border}`, paddingLeft:20 }}>
-            <p style={s.muted}>Liquidação Líquida</p>
-            <p style={{ fontSize:28, fontFamily:'monospace', color:pending.net>0?C.red:pending.net<0?C.green:C.muted, fontWeight:700, marginTop:4 }}>{maskFmt(Math.abs(pending.net), hide)}</p>
-            <p style={{ fontSize:12, color:pending.net>0?C.red:C.green, fontWeight:600, marginTop:4 }}>
-              {pending.net>0.01?'🔴 Guilherme transfere para Bruna':pending.net<-0.01?'🟢 Bruna transfere para Guilherme':'✅ Zerado'}
-            </p>
-          </div>
-        </div>
-        <p style={{ ...s.muted, marginTop:12, fontSize:11 }}>
-          Meses já liquidados não compõem este saldo.
-        </p>
-      </div>
-
-      <p style={{ ...s.label, marginBottom:12 }}>📅 Mês a Mês</p>
-      <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(300px,1fr))', gap:12 }}>
-        {months.map(m => {
-          const isPaid = !!paidMonths[m.idx];
-          const color = isPaid ? C.green : m.direction==='g2b'?C.red:m.direction==='b2g'?C.green:C.muted;
-          const txt = isPaid ? '✓ Liquidado' : m.direction==='g2b'?'Guilherme → Bruna':m.direction==='b2g'?'Bruna → Guilherme':'Zerado';
-          const eff = isPaid ? 0 : Math.abs(m.net);
-          return (
-            <div key={m.idx} style={{ ...s.card, borderLeft:`4px solid ${color}` }}>
-              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:10 }}>
-                <p style={{ fontSize:16, fontWeight:700, color:C.text }}>{m.mes}</p>
-                <Badge text={txt} color={color} />
-              </div>
-              <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8, marginBottom:10, fontSize:12 }}>
-                <div style={{ background:C.panel, padding:'6px 10px', borderRadius:6 }}>
-                  <p style={{ color:C.muted, fontSize:10 }}>G a pagar</p>
-                  <p style={{ color:isPaid?C.muted:C.red, fontFamily:'monospace', marginTop:2, textDecoration:isPaid?'line-through':'none' }}>{maskFmt(m.gOwesB, hide)}</p>
-                </div>
-                <div style={{ background:C.panel, padding:'6px 10px', borderRadius:6 }}>
-                  <p style={{ color:C.muted, fontSize:10 }}>B a pagar</p>
-                  <p style={{ color:isPaid?C.muted:C.green, fontFamily:'monospace', marginTop:2, textDecoration:isPaid?'line-through':'none' }}>{maskFmt(m.bOwesG, hide)}</p>
-                </div>
-              </div>
-              <div style={{ borderTop:`1px dashed ${C.border}`, paddingTop:8, display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-                <span style={{ fontSize:11, color:C.muted }}>Transferência líquida</span>
-                <span style={{ fontSize:16, fontFamily:'monospace', fontWeight:700, color }}>{maskFmt(eff, hide)}</span>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-// ─── TAB: SPLIT ANUAL ───
-function SplitTab({ a, viewMode, selectedMonth, currentMonth }) {
-  const hide = useHideBalances();
-  const { paidMonths } = usePaidMonths();
-
-  if (viewMode === 'monthly') {
-    const m = a.monthly[selectedMonth];
-    const isPaid = !!paidMonths[selectedMonth];
-    const g2bTotal = isPaid ? 0 : m.gOwesB;
-    const b2gTotal = isPaid ? 0 : m.bOwesG;
-    const netMonth = isPaid ? 0 : m.net;
-    const g2bRows = a.rows
-      .filter(r => r.q === 'Guilherme' && r.p === 'Bruna')
-      .map(r => {
-        const v = r.m[selectedMonth] || 0;
-        return v > 0 ? { ...r, total: v } : null;
-      })
-      .filter(Boolean);
-    const b2gRows = a.rows
-      .filter(r => r.q === 'Bruna' && r.p === 'Guilherme')
-      .map(r => {
-        const v = r.m[selectedMonth] || 0;
-        return v > 0 ? { ...r, total: v } : null;
-      })
-      .filter(Boolean);
-    const monthFixed = a.rows.filter(r => r.c === 'Despesa Fixa').reduce((s, r) => s + (r.m[selectedMonth] || 0), 0);
-    const monthTotal = m.total;
-    const monthVar = monthTotal - monthFixed;
-    return (
-      <div>
-        <MonthlySummaryBanner mData={m} rows={a.rows} currentMonth={currentMonth} />
-
-        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))', gap:16, marginBottom:24 }}>
-          <div style={{ ...s.card, borderTop:`3px solid ${C.blue}` }}>
-            <p style={s.label}>Guilherme a pagar à Bruna</p>
-            <p style={{ ...s.val, color:isPaid?C.green:C.red, marginTop:6 }}>{maskFmt(g2bTotal, hide)}</p>
-            <p style={s.muted}>{g2bRows.length} lançamentos {isPaid && '(liquidado)'}</p>
-          </div>
-          <div style={{ ...s.card, borderTop:`3px solid ${C.amber}` }}>
-            <p style={s.label}>Bruna a pagar ao Guilherme</p>
-            <p style={{ ...s.val, color:isPaid?C.green:C.green, marginTop:6 }}>{maskFmt(b2gTotal, hide)}</p>
-            <p style={s.muted}>{b2gRows.length} lançamentos {isPaid && '(liquidado)'}</p>
-          </div>
-          <div style={{ ...s.card, borderTop:`3px solid ${isPaid?C.green:netMonth>0?C.red:C.green}` }}>
-            <p style={s.label}>Saldo Líquido</p>
-            <p style={{ ...s.val, color:isPaid?C.green:netMonth>0?C.red:C.green, marginTop:6 }}>{maskFmt(Math.abs(netMonth), hide)}</p>
-            <p style={s.muted}>{isPaid ? '✓ Liquidado' : netMonth>0.01?'Guilherme → Bruna':netMonth<-0.01?'Bruna → Guilherme':'Zerado'}</p>
-          </div>
-        </div>
-        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16, marginBottom:16 }}>
-          <div style={s.card}>
-            <p style={{ ...s.label, color:C.red, marginBottom:12 }}>Guilherme → Bruna</p>
-            <div style={{ display:'flex', flexDirection:'column', gap:8, maxHeight:400, overflowY:'auto' }}>
-              {g2bRows.sort((a,b)=>b.total-a.total).map((r,i) => (
-                <div key={i} style={{ display:'flex', justifyContent:'space-between', padding:'8px 12px', background:C.panel, borderRadius:8, borderLeft:`3px solid ${CAT_C[r.c]||C.muted}` }}>
-                  <div style={{ minWidth:0 }}>
-                    <p style={{ fontSize:13, color:C.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{r.d}</p>
-                    <p style={{ fontSize:11, color:C.muted }}>{r.c} • {r.t}</p>
-                  </div>
-                    <p style={{ fontSize:13, fontFamily:'monospace', color:C.red, alignSelf:'center', marginLeft:8 }}>{maskFmt(r.total, hide)}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-          <div style={s.card}>
-            <p style={{ ...s.label, color:C.green, marginBottom:12 }}>Bruna → Guilherme</p>
-            {b2gRows.length > 0 ? (
-              <div style={{ display:'flex', flexDirection:'column', gap:8, maxHeight:400, overflowY:'auto' }}>
-                {b2gRows.sort((a,b)=>b.total-a.total).map((r,i) => (
-                  <div key={i} style={{ display:'flex', justifyContent:'space-between', padding:'8px 12px', background:C.panel, borderRadius:8, borderLeft:`3px solid ${CAT_C[r.c]||C.muted}` }}>
-                    <div style={{ minWidth:0 }}>
-                      <p style={{ fontSize:13, color:C.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{r.d}</p>
-                      <p style={{ fontSize:11, color:C.muted }}>{r.c} • {r.t}</p>
-                    </div>
-                    <p style={{ fontSize:13, fontFamily:'monospace', color:C.green, alignSelf:'center', marginLeft:8 }}>{maskFmt(r.total, hide)}</p>
-                  </div>
-                ))}
-              </div>
-            ) : <p style={s.muted}>Nenhum repasse nesta direção.</p>}
-          </div>
-        </div>
-        <div style={s.card}>
-          <p style={{ ...s.label, marginBottom:12 }}>Fixo vs Variável (Mês)</p>
-          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 }}>
-            <div>
-              <p style={{ ...s.muted, marginBottom:6 }}>Despesas Fixas</p>
-              <p style={{ fontSize:22, fontFamily:'monospace', color:C.red }}>{maskFmt(monthFixed, hide)}</p>
-              <p style={s.muted}>{pct(monthFixed, monthTotal)} do total</p>
-            </div>
-            <div>
-              <p style={{ ...s.muted, marginBottom:6 }}>Despesas Variáveis</p>
-              <p style={{ fontSize:22, fontFamily:'monospace', color:C.blue }}>{maskFmt(monthVar, hide)}</p>
-              <p style={s.muted}>{pct(monthVar, monthTotal)} do total</p>
-            </div>
-          </div>
-          <div style={{ marginTop:16, height:8, borderRadius:4, background:C.dim, overflow:'hidden' }}>
-            <div style={{ height:'100%', width:pct(monthFixed, monthTotal), background:C.red, borderRadius:4 }}/>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  const pending = pendingSettlement(a.monthly, paidMonths);
-  const splitRows = a.rows.filter(r => r.q !== r.p && r.total > 0);
-  const g2bRows = splitRows.filter(r => r.q==='Guilherme'&&r.p==='Bruna');
-  const b2gRows = splitRows.filter(r => r.q==='Bruna'&&r.p==='Guilherme');
-  return (
-    <div>
-      <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))', gap:16, marginBottom:24 }}>
-        <div style={{ ...s.card, borderTop:`3px solid ${C.blue}` }}>
-          <p style={s.label}>Guilherme a pagar (pendente)</p>
-          <p style={{ ...s.val, color:C.red, marginTop:6 }}>{maskFmt(pending.g2b, hide)}</p>
-          <p style={s.muted}>{g2bRows.length} lançamentos no ano</p>
-        </div>
-        <div style={{ ...s.card, borderTop:`3px solid ${C.amber}` }}>
-          <p style={s.label}>Bruna a pagar (pendente)</p>
-          <p style={{ ...s.val, color:C.green, marginTop:6 }}>{maskFmt(pending.b2g, hide)}</p>
-          <p style={s.muted}>{b2gRows.length} lançamentos no ano</p>
-        </div>
-        <div style={{ ...s.card, borderTop:`3px solid ${pending.net>0?C.red:C.green}` }}>
-          <p style={s.label}>Saldo Líquido</p>
-          <p style={{ ...s.val, color:pending.net>0?C.red:C.green, marginTop:6 }}>{maskFmt(Math.abs(pending.net), hide)}</p>
-          <p style={s.muted}>{pending.net>0.01?'Guilherme → Bruna':pending.net<-0.01?'Bruna → Guilherme':'Zerado'}</p>
-        </div>
-      </div>
-      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16, marginBottom:16 }}>
-        <div style={s.card}>
-          <p style={{ ...s.label, color:C.red, marginBottom:12 }}>Guilherme → Bruna</p>
-          <div style={{ display:'flex', flexDirection:'column', gap:8, maxHeight:400, overflowY:'auto' }}>
-            {g2bRows.sort((a,b)=>b.total-a.total).map((r,i) => (
-              <div key={i} style={{ display:'flex', justifyContent:'space-between', padding:'8px 12px', background:C.panel, borderRadius:8, borderLeft:`3px solid ${CAT_C[r.c]||C.muted}` }}>
-                <div style={{ minWidth:0 }}>
-                  <p style={{ fontSize:13, color:C.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{r.d}</p>
-                  <p style={{ fontSize:11, color:C.muted }}>{r.c} • {r.t}</p>
-                </div>
-                <p style={{ fontSize:13, fontFamily:'monospace', color:C.red, alignSelf:'center', marginLeft:8 }}>{maskFmt(r.total, hide)}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-        <div style={s.card}>
-          <p style={{ ...s.label, color:C.green, marginBottom:12 }}>Bruna → Guilherme</p>
-          {b2gRows.length > 0 ? (
-            <div style={{ display:'flex', flexDirection:'column', gap:8, maxHeight:400, overflowY:'auto' }}>
-              {b2gRows.sort((a,b)=>b.total-a.total).map((r,i) => (
-                <div key={i} style={{ display:'flex', justifyContent:'space-between', padding:'8px 12px', background:C.panel, borderRadius:8, borderLeft:`3px solid ${CAT_C[r.c]||C.muted}` }}>
-                  <div style={{ minWidth:0 }}>
-                    <p style={{ fontSize:13, color:C.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{r.d}</p>
-                    <p style={{ fontSize:11, color:C.muted }}>{r.c} • {r.t}</p>
-                  </div>
-                  <p style={{ fontSize:13, fontFamily:'monospace', color:C.green, alignSelf:'center', marginLeft:8 }}>{maskFmt(r.total, hide)}</p>
-                </div>
-              ))}
-            </div>
-          ) : <p style={s.muted}>Nenhum repasse nesta direção.</p>}
-        </div>
-      </div>
-      <div style={s.card}>
-        <p style={{ ...s.label, marginBottom:12 }}>Fixo vs Variável</p>
-        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 }}>
-          <div>
-            <p style={{ ...s.muted, marginBottom:6 }}>Despesas Fixas</p>
-            <p style={{ fontSize:22, fontFamily:'monospace', color:C.red }}>{maskFmt(a.fixedTotal, hide)}</p>
-            <p style={s.muted}>{pct(a.fixedTotal,a.totalGeral)} do total</p>
-          </div>
-          <div>
-            <p style={{ ...s.muted, marginBottom:6 }}>Despesas Variáveis</p>
-            <p style={{ fontSize:22, fontFamily:'monospace', color:C.blue }}>{maskFmt(a.varTotal, hide)}</p>
-            <p style={s.muted}>{pct(a.varTotal,a.totalGeral)} do total</p>
-          </div>
-        </div>
-        <div style={{ marginTop:16, height:8, borderRadius:4, background:C.dim, overflow:'hidden' }}>
-          <div style={{ height:'100%', width:pct(a.fixedTotal,a.totalGeral), background:C.red, borderRadius:4 }}/>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── TAB: TENDÊNCIAS ───
-function TendenciasTab({ a }) {
-  const hide = useHideBalances();
-  const momData = a.monthlyActive.map((m,i,arr) => {
-    const prev = arr[i-1];
-    const mom = prev&&prev.total ? ((m.total-prev.total)/prev.total*100) : 0;
-    return { ...m, mom: Math.round(mom*10)/10 };
-  });
-
-  return (
-    <div>
-      <div style={{ ...s.card, marginBottom:16 }}>
-        <p style={{ ...s.label, marginBottom:16 }}>Evolução Mensal (R$)</p>
-        <ResponsiveContainer width="100%" height={260}>
-          <AreaChart data={a.monthlyActive} margin={{top:0,right:10,bottom:0,left:20}}>
-            <defs>
-              <linearGradient id="gG" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor={C.blue} stopOpacity={0.3}/>
-                <stop offset="95%" stopColor={C.blue} stopOpacity={0}/>
-              </linearGradient>
-              <linearGradient id="gB" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor={C.amber} stopOpacity={0.3}/>
-                <stop offset="95%" stopColor={C.amber} stopOpacity={0}/>
-              </linearGradient>
-            </defs>
-            <XAxis dataKey="mes" tick={{fill:C.muted,fontSize:11}} axisLine={false} tickLine={false} />
-            <YAxis tick={{fill:C.muted,fontSize:11}} axisLine={false} tickLine={false} tickFormatter={v=>hide?'•••':`${(v/1000).toFixed(0)}k`} />
-            <Tooltip content={<TT/>} />
-            <Area type="monotone" dataKey="Guilherme" stroke={C.blue} fill="url(#gG)" strokeWidth={2} />
-            <Area type="monotone" dataKey="Bruna" stroke={C.amber} fill="url(#gB)" strokeWidth={2} />
-          </AreaChart>
-        </ResponsiveContainer>
-      </div>
-      <div style={s.card}>
-        <p style={{ ...s.label, marginBottom:16 }}>Variação Mensal (MoM %)</p>
-        <ResponsiveContainer width="100%" height={200}>
-          <BarChart data={momData.slice(1)} margin={{top:10,right:10,bottom:0,left:10}}>
-            <XAxis dataKey="mes" tick={{fill:C.muted,fontSize:11}} axisLine={false} tickLine={false} />
-            <YAxis tick={{fill:C.muted,fontSize:11}} axisLine={false} tickLine={false} tickFormatter={v=>`${v}%`} />
-            <Tooltip formatter={v=>`${v}%`} contentStyle={{background:C.panel,border:`1px solid ${C.border}`,borderRadius:8}} />
-            <Bar dataKey="mom" radius={4}>
-              {momData.slice(1).map((e,i)=><Cell key={i} fill={e.mom>=0?C.red:C.green} />)}
-            </Bar>
-          </BarChart>
-        </ResponsiveContainer>
-      </div>
-      <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(160px,1fr))', gap:16, marginTop:16 }}>
-        <div style={s.cardSm}>
-          <p style={s.label}>Pico de Gasto</p>
-          <p style={{ fontSize:18, fontFamily:'monospace', color:C.red, marginTop:4 }}>{a.monthlyActive.reduce((p,c)=>c.total>p.total?c:p,{total:0,mes:'-'}).mes}</p>
-          <p style={s.muted}>{maskFmt(a.monthlyActive.reduce((p,c)=>c.total>p.total?c:p,{total:0}).total, hide)}</p>
-        </div>
-        <div style={s.cardSm}>
-          <p style={s.label}>Média Mensal</p>
-          <p style={{ fontSize:18, fontFamily:'monospace', color:C.gold, marginTop:4 }}>{maskFmt(a.totalGeral/Math.max(1,a.monthlyActive.length), hide)}</p>
-          <p style={s.muted}>{a.monthlyActive.length} meses ativos</p>
-        </div>
-        <div style={s.cardSm}>
-          <p style={s.label}>Menor Mês</p>
-          <p style={{ fontSize:18, fontFamily:'monospace', color:C.green, marginTop:4 }}>{a.monthlyActive.reduce((p,c)=>c.total<p.total?c:p,{total:Infinity,mes:'-'}).mes}</p>
-          <p style={s.muted}>{maskFmt(a.monthlyActive.reduce((p,c)=>c.total<p.total?c:p,{total:Infinity}).total, hide)}</p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── TAB: CATEGORIAS ───
-function CategoriasTab({ a, viewMode, selectedMonth }) {
-  const hide = useHideBalances();
-  if (viewMode === 'monthly') {
-    const monthRows = a.rows
-      .map(r => ({ ...r, val: r.m[selectedMonth] || 0 }))
-      .filter(r => r.val > 0);
-
-    const byCat = {};
-    const byDesc = {};
-
-    monthRows.forEach(r => {
-      byCat[r.c] = (byCat[r.c] || 0) + r.val;
-      byDesc[r.d] = (byDesc[r.d] || 0) + r.val;
-    });
-
-    const catEntries = Object.entries(byCat).sort((x,y)=>y[1]-x[1]);
-    const topDesc = Object.entries(byDesc).sort((x,y)=>y[1]-x[1]).slice(0,10);
-    const monthTotal = catEntries.reduce((s,[,v])=>s+v,0);
-
-    if (monthRows.length === 0) {
-      return (
-        <div style={{ ...s.card, textAlign:'center', padding:48 }}>
-          <p style={{ fontSize:32, marginBottom:12 }}>📭</p>
-          <p style={{ color:C.muted }}>Sem categorias com lançamentos em {ML[selectedMonth]}.</p>
-        </div>
-      );
-    }
-
-    return (
-      <div>
-        <div style={{ ...s.card, marginBottom:20, border:`1px solid ${C.gold}40`, background:`linear-gradient(135deg, ${C.card}, #0A1E35)` }}>
-          <p style={{ ...s.label, color:C.gold }}>🏷 Categorias — {ML[selectedMonth]} {YEAR}</p>
-          <p style={{ fontSize:28, fontWeight:700, marginTop:10, color:C.text, fontFamily:'monospace' }}>
-            {maskFmt(monthTotal, hide)}
-          </p>
-          <p style={{ ...s.muted, marginTop:6 }}>
-            {catEntries.length} categorias ativas • {monthRows.length} lançamentos no mês
-          </p>
-        </div>
-
-        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))', gap:12, marginBottom:20 }}>
-          {catEntries.map(([cat,val]) => (
-            <div key={cat} style={{ ...s.cardSm, borderLeft:`4px solid ${CAT_C[cat] || C.muted}` }}>
-              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start' }}>
-                <div>
-                  <p style={{ ...s.label, color:CAT_C[cat] || C.muted }}>{cat}</p>
-                  <p style={{ fontSize:20, fontFamily:'monospace', color:C.text, marginTop:4 }}>{maskFmt(val, hide)}</p>
-                </div>
-                <span style={{ fontSize:12, color:CAT_C[cat] || C.muted, fontWeight:700 }}>{pct(val,monthTotal)}</span>
-              </div>
-              <div style={{ marginTop:10, height:5, borderRadius:4, background:C.dim, overflow:'hidden' }}>
-                <div style={{ height:'100%', width:pct(val,monthTotal), background:CAT_C[cat] || C.muted, borderRadius:4 }}/>
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <div style={s.card}>
-          <p style={{ ...s.label, marginBottom:16 }}>Top 10 Maiores Despesas do Mês</p>
-          <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-            {topDesc.map(([desc,val],i) => {
-              const matched = monthRows.find(r=>r.d===desc);
-              const cat = matched?.c || 'Outros';
-              return (
-                <div key={i} style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'8px 12px', background:C.panel, borderRadius:8 }}>
-                  <div style={{ display:'flex', alignItems:'center', gap:12, minWidth:0 }}>
-                    <span style={{ fontSize:11, color:C.muted, fontFamily:'monospace', minWidth:20 }}>#{i+1}</span>
-                    <div style={{ minWidth:0 }}>
-                      <p style={{ fontSize:13, color:C.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{desc}</p>
-                      <span style={s.tag(CAT_C[cat]||C.muted)}>{cat}</span>
-                    </div>
-                  </div>
-                  <div style={{ textAlign:'right', marginLeft:12 }}>
-                    <p style={{ fontSize:14, fontFamily:'monospace', color:C.text }}>{maskFmt(val, hide)}</p>
-                    <p style={{ fontSize:11, color:C.muted }}>{pct(val,monthTotal)}</p>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  const catEntries = Object.entries(a.byCat).sort((x,y)=>y[1]-x[1]);
-
-  return (
-    <div>
-      <div style={{ ...s.card, marginBottom:20, border:`1px solid ${C.gold}40`, background:`linear-gradient(135deg, ${C.card}, #0A1E35)` }}>
-        <p style={{ ...s.label, color:C.gold }}>🏷 Categorias — Visão Anual {YEAR}</p>
-        <p style={{ fontSize:28, fontWeight:700, marginTop:10, color:C.text, fontFamily:'monospace' }}>
-          {maskFmt(a.totalGeral, hide)}
-        </p>
-        <p style={{ ...s.muted, marginTop:6 }}>{catEntries.length} categorias ativas no ano</p>
-      </div>
-
-      <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))', gap:12, marginBottom:20 }}>
-        {catEntries.map(([cat,val]) => (
-          <div key={cat} style={{ ...s.cardSm, borderLeft:`4px solid ${CAT_C[cat] || C.muted}` }}>
-            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start' }}>
-              <div>
-                <p style={{ ...s.label, color:CAT_C[cat] || C.muted }}>{cat}</p>
-                <p style={{ fontSize:20, fontFamily:'monospace', color:C.text, marginTop:4 }}>{maskFmt(val, hide)}</p>
-              </div>
-              <span style={{ fontSize:12, color:CAT_C[cat] || C.muted, fontWeight:700 }}>{pct(val,a.totalGeral)}</span>
-            </div>
-            <div style={{ marginTop:10, height:4, borderRadius:2, background:C.dim }}>
-              <div style={{ height:'100%', width:pct(val,a.totalGeral), background:CAT_C[cat] || C.muted, borderRadius:2 }}/>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      <div style={s.card}>
-        <p style={{ ...s.label, marginBottom:16 }}>Top 10 Maiores Despesas (Item)</p>
-        <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-          {a.topDesc.map(([desc,val],i) => {
-            const matched = a.rows.find(r=>r.d===desc);
-            const cat = matched?.c||'Outros';
-            return (
-              <div key={i} style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'8px 12px', background:C.panel, borderRadius:8 }}>
-                <div style={{ display:'flex', alignItems:'center', gap:12, minWidth:0 }}>
-                  <span style={{ fontSize:11, color:C.muted, fontFamily:'monospace', minWidth:20 }}>#{i+1}</span>
-                  <div style={{ minWidth:0 }}>
-                    <p style={{ fontSize:13, color:C.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{desc}</p>
-                    <span style={s.tag(CAT_C[cat]||C.muted)}>{cat}</span>
-                  </div>
-                </div>
-                <div style={{ textAlign:'right', marginLeft:12 }}>
-                  <p style={{ fontSize:14, fontFamily:'monospace', color:C.text }}>{maskFmt(val, hide)}</p>
-                  <p style={{ fontSize:11, color:C.muted }}>{pct(val,a.totalGeral)}</p>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ─── TAB: ADICIONAR ───
 function AdicionarTab({ rows, onChange }) {
-  const [form, setForm] = useState({ t:'Cartão de Crédito',q:'Bruna',p:'Bruna',c:'Mercado',d:'',mode:'unico',mes:0,valor:'',mesInicial:0,parcelas:1,valorParcela:'' });
+  const [form, setForm] = useState({
+    divisao:'compartilhada',           // compartilhada | individual
+    t:'Cartão de Crédito', c:'Mercado', d:'',
+    payer:'Bruna',                     // quem pagou (compartilhada) → campo p das 2 linhas
+    person:'Bruna',                    // pessoa (individual) → q = p
+    split:'igual',                     // igual | custom
+    guiValor:'',                       // parte do Guilherme (custom)
+    mode:'unico',                      // unico | parcelado
+    mes:0, valor:'',                   // à vista
+    mesInicial:0, parcelas:1, valorParcela:'', // parcelado
+  });
   const [done, setDone] = useState('');
-  const update = (k,v) => setForm(f=>({...f,[k]:v}));
+  const update = (k,v) => setForm(f=>({ ...f, [k]:v }));
+
+  // Valor total da ocorrência (à vista = valor; parcelado = valor por parcela).
+  const occTotal = parseBRNumber(form.mode==='unico' ? form.valor : form.valorParcela);
+  const shared = form.divisao==='compartilhada';
+  const guiShare = !shared ? null
+    : form.split==='igual'
+      ? (occTotal!=null ? Math.round(occTotal*50)/100 : null)
+      : parseBRNumber(form.guiValor);
+  const bruShare = (shared && occTotal!=null && guiShare!=null)
+    ? Math.round((occTotal - guiShare)*100)/100
+    : null;
+
+  const buildMonths = perMonth => {
+    const m = Array(12).fill(0);
+    if (form.mode==='unico') m[form.mes] = perMonth;
+    else { const n = parseInt(form.parcelas)||0; for (let i=0;i<n&&(form.mesInicial+i)<12;i++) m[form.mesInicial+i] = perMonth; }
+    return m;
+  };
 
   const submit = () => {
     if (!form.d.trim()) { setDone('❌ Descrição obrigatória'); return; }
-    const m = Array(12).fill(0);
-    if (form.mode==='unico') {
-      const v = parseFloat(String(form.valor).replace(',','.'));
-      if (!v||v<=0) { setDone('❌ Valor inválido'); return; }
-      m[form.mes] = v;
+    if (occTotal==null || occTotal<=0) { setDone('❌ Valor inválido'); return; }
+    if (form.mode==='parcelado') { const n=parseInt(form.parcelas); if(!n||n<1){ setDone('❌ Nº de parcelas inválido'); return; } }
+
+    let added;
+    if (!shared) {
+      const m = buildMonths(occTotal);
+      added = [{ id:uid(), t:form.t, q:form.person, p:form.person, c:form.c, d:form.d.trim(), m, total:m.reduce((s,v)=>s+v,0) }];
     } else {
-      const v = parseFloat(String(form.valorParcela).replace(',','.'));
-      const n = parseInt(form.parcelas);
-      if (!v||v<=0||!n||n<1) { setDone('❌ Valores inválidos'); return; }
-      for (let i=0;i<n&&(form.mesInicial+i)<12;i++) m[form.mesInicial+i]=v;
+      if (guiShare==null || guiShare<0 || guiShare>occTotal) { setDone('❌ Divisão inválida — a parte do Guilherme deve estar entre 0 e o total.'); return; }
+      const mG = buildMonths(guiShare);
+      const mB = buildMonths(bruShare);
+      const base = { t:form.t, c:form.c, d:form.d.trim(), p:form.payer };
+      added = [
+        { id:uid(), ...base, q:'Guilherme', m:mG, total:mG.reduce((s,v)=>s+v,0) },
+        { id:uid(), ...base, q:'Bruna',     m:mB, total:mB.reduce((s,v)=>s+v,0) },
+      ];
     }
-    onChange([...rows, { id:uid(), t:form.t, q:form.q, p:form.p, c:form.c, d:form.d.trim(), m, total:m.reduce((s,v)=>s+v,0) }]);
+    onChange([...rows, ...added]);
     setDone(`✅ "${form.d}" adicionada!`);
-    setForm(f=>({...f,d:'',valor:'',valorParcela:'',parcelas:1}));
+    setForm(f=>({ ...f, d:'', valor:'', valorParcela:'', guiValor:'', parcelas:1 }));
     setTimeout(()=>setDone(''), 4000);
   };
 
@@ -1732,40 +1244,93 @@ function AdicionarTab({ rows, onChange }) {
     <div>
       <div style={{ ...s.card, marginBottom:16, borderColor:C.gold }}>
         <p style={{ ...s.label, color:C.gold, marginBottom:6 }}>📝 Nova Despesa</p>
-        <p style={{ ...s.muted, lineHeight:1.6 }}>Para despesas <strong style={{color:C.text}}>compartilhadas</strong>, cadastre duas linhas (uma por pessoa).</p>
+        <p style={{ ...s.muted, lineHeight:1.6 }}>Em <strong style={{color:C.text}}>Compartilhada</strong>, escolha quem pagou e a divisão — o app cria os dois lançamentos (um por pessoa) automaticamente.</p>
       </div>
       <div style={s.card}>
-        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))', gap:16 }}>
+        {/* Divisão */}
+        <p style={{ ...s.label, marginBottom:8 }}>Divisão</p>
+        <SegToggle
+          value={form.divisao}
+          onChange={v=>update('divisao',v)}
+          options={[{ value:'compartilhada', label:'🤝 Compartilhada' }, { value:'individual', label:'👤 Individual' }]}
+        />
+
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))', gap:16, marginTop:16 }}>
           <Field label="Tipo"><select style={s.input} value={form.t} onChange={e=>update('t',e.target.value)}>{TIPOS.map(t=><option key={t} value={t}>{t}</option>)}</select></Field>
           <Field label="Categoria"><select style={s.input} value={form.c} onChange={e=>update('c',e.target.value)}>{CATEGORIAS.map(c=><option key={c} value={c}>{c}</option>)}</select></Field>
-          <Field label="Quem pagou"><select style={s.input} value={form.q} onChange={e=>update('q',e.target.value)}>{PESSOAS.map(p=><option key={p} value={p}>{p}</option>)}</select></Field>
-          <Field label="Para quem"><select style={s.input} value={form.p} onChange={e=>update('p',e.target.value)}>{PESSOAS.map(p=><option key={p} value={p}>{p}</option>)}</select></Field>
           <Field label="Descrição" span={2}><input style={s.input} value={form.d} onChange={e=>update('d',e.target.value)} placeholder="ex: Conta de luz, Mercado..." /></Field>
         </div>
+
+        {/* Quem pagou / Pessoa */}
+        <div style={{ marginTop:16 }}>
+          {shared ? (
+            <>
+              <p style={{ ...s.label, marginBottom:8 }}>Quem pagou a conta</p>
+              <SegToggle value={form.payer} onChange={v=>update('payer',v)} accent={form.payer==='Guilherme'?C.blue:C.amber}
+                options={PESSOAS.map(p=>({ value:p, label:`👤 ${p}` }))} />
+            </>
+          ) : (
+            <>
+              <p style={{ ...s.label, marginBottom:8 }}>Pessoa</p>
+              <SegToggle value={form.person} onChange={v=>update('person',v)} accent={form.person==='Guilherme'?C.blue:C.amber}
+                options={PESSOAS.map(p=>({ value:p, label:`👤 ${p}` }))} />
+            </>
+          )}
+        </div>
+
+        {/* Modo de pagamento */}
         <div style={{ marginTop:24, paddingTop:20, borderTop:`1px dashed ${C.border}` }}>
           <p style={{ ...s.label, marginBottom:12 }}>Modo de Pagamento</p>
-          <div style={{ display:'flex', gap:8, marginBottom:16 }}>
-            {[{k:'unico',l:'💵 À Vista'},{k:'parcelado',l:'💳 Parcelado'}].map(opt=>(
-              <button key={opt.k} onClick={()=>update('mode',opt.k)}
-                style={{ flex:1, padding:'10px 16px', borderRadius:8, border:`1px solid ${form.mode===opt.k?C.gold:C.border}`, background:form.mode===opt.k?C.goldDim:'transparent', color:form.mode===opt.k?C.gold:C.muted, fontSize:13, fontWeight:600, cursor:'pointer', transition:'all 0.2s' }}>
-                {opt.l}
-              </button>
-            ))}
-          </div>
+          <SegToggle value={form.mode} onChange={v=>update('mode',v)}
+            options={[{ value:'unico', label:'💵 À Vista' }, { value:'parcelado', label:'💳 Parcelado' }]} />
           {form.mode==='unico' ? (
-            <div style={{ display:'grid', gridTemplateColumns:'1fr 2fr', gap:16 }}>
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 2fr', gap:16, marginTop:16 }}>
               <Field label="Mês"><select style={s.input} value={form.mes} onChange={e=>update('mes',parseInt(e.target.value))}>{ML.map((m,i)=><option key={i} value={i}>{m}</option>)}</select></Field>
-              <Field label="Valor (R$)"><input style={s.input} value={form.valor} onChange={e=>update('valor',e.target.value)} placeholder="0,00" /></Field>
+              <Field label={shared?'Valor total (R$)':'Valor (R$)'}><input style={s.input} inputMode="decimal" value={form.valor} onChange={e=>update('valor',e.target.value)} placeholder="0,00" /></Field>
             </div>
           ) : (
-            <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))', gap:16 }}>
+            <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))', gap:16, marginTop:16 }}>
               <Field label="Mês inicial"><select style={s.input} value={form.mesInicial} onChange={e=>update('mesInicial',parseInt(e.target.value))}>{ML.map((m,i)=><option key={i} value={i}>{m}</option>)}</select></Field>
               <Field label="Nº parcelas"><input style={s.input} type="number" min="1" max="12" value={form.parcelas} onChange={e=>update('parcelas',e.target.value)} /></Field>
-              <Field label="Valor por parcela"><input style={s.input} value={form.valorParcela} onChange={e=>update('valorParcela',e.target.value)} placeholder="0,00" /></Field>
+              <Field label={shared?'Valor total/parcela':'Valor por parcela'}><input style={s.input} inputMode="decimal" value={form.valorParcela} onChange={e=>update('valorParcela',e.target.value)} placeholder="0,00" /></Field>
             </div>
           )}
         </div>
-        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginTop:24 }}>
+
+        {/* Divisão dos valores (só compartilhada) */}
+        {shared && (
+          <div style={{ marginTop:24, paddingTop:20, borderTop:`1px dashed ${C.border}` }}>
+            <p style={{ ...s.label, marginBottom:12 }}>Como dividir</p>
+            <SegToggle value={form.split} onChange={v=>update('split',v)}
+              options={[{ value:'igual', label:'½ Igual (50/50)' }, { value:'custom', label:'✎ Personalizado' }]} />
+            {form.split==='custom' && (
+              <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))', gap:16, marginTop:16 }}>
+                <Field label="Parte do Guilherme (R$)"><input style={s.input} inputMode="decimal" value={form.guiValor} onChange={e=>update('guiValor',e.target.value)} placeholder="0,00" /></Field>
+                <div>
+                  <label style={{ ...s.label, display:'block', marginBottom:6 }}>Parte da Bruna (auto)</label>
+                  <div style={{ ...s.input, color:bruShare!=null&&bruShare>=0?C.amber:C.muted, fontFamily:'monospace' }}>
+                    {bruShare!=null ? fmt(bruShare) : '—'}
+                  </div>
+                </div>
+              </div>
+            )}
+            {/* Prévia do split */}
+            {occTotal!=null && guiShare!=null && bruShare!=null && (
+              <div style={{ display:'flex', gap:8, marginTop:16, flexWrap:'wrap' }}>
+                <div style={{ flex:1, minWidth:140, background:C.panel, borderRadius:10, padding:'10px 14px', borderLeft:`3px solid ${C.blue}` }}>
+                  <p style={{ fontSize:11, color:C.muted }}>Guilherme</p>
+                  <p style={{ fontSize:16, fontFamily:'monospace', color:C.blue, fontWeight:700 }}>{fmt(guiShare)}</p>
+                </div>
+                <div style={{ flex:1, minWidth:140, background:C.panel, borderRadius:10, padding:'10px 14px', borderLeft:`3px solid ${C.amber}` }}>
+                  <p style={{ fontSize:11, color:C.muted }}>Bruna</p>
+                  <p style={{ fontSize:16, fontFamily:'monospace', color:C.amber, fontWeight:700 }}>{fmt(bruShare)}</p>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginTop:24, gap:12, flexWrap:'wrap' }}>
           <p style={{ fontSize:12, color:done.startsWith('✅')?C.green:done.startsWith('❌')?C.red:C.muted }}>{done}</p>
           <button onClick={submit} style={s.btn(C.gold)}>✨ Adicionar</button>
         </div>
@@ -2235,6 +1800,11 @@ export default function App() {
   const [saveStatus, setSaveStatus] = useState('clean');
   const [saveErrorMsg, setSaveErrorMsg] = useState('');
 
+  // Sincronização com a nuvem (multi-aparelho).
+  const [lastSyncAt, setLastSyncAt] = useState(null);     // ms do último load/atualização vindo da nuvem
+  const [cloudUpdatedAt, setCloudUpdatedAt] = useState(null); // updated_at do servidor (detecta mudança)
+  const [reloading, setReloading] = useState(false);
+
   // Mês atual dinâmico (timezone do navegador, esperado America/Sao_Paulo).
   const currentMonth = useMemo(() => new Date().getMonth(), []);
   const currentMonthLabel = useMemo(() => getCurrentMonthLabel(), []);
@@ -2287,7 +1857,12 @@ export default function App() {
   }, [hidePreviousMonths, selectedMonth, currentMonth]);
 
   useEffect(() => {
-    loadData().then(d => { setData(d); setLoaded(true); });
+    loadData().then(res => {
+      setData(res.data);
+      setCloudUpdatedAt(res.updatedAt);
+      if (res.source === 'cloud') setLastSyncAt(Date.now());
+      setLoaded(true);
+    });
     const style = document.createElement('style');
     style.textContent = `
       * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -2326,6 +1901,8 @@ export default function App() {
     try {
       await saveData(dataRef.current);            // grava na nuvem + cache local
       setSaveErrorMsg('');
+      setLastSyncAt(Date.now());
+      setCloudUpdatedAt(null); // força reconciliar no próximo foco
       setSaveStatus('savedCloud');
       setTimeout(() => setSaveStatus(s => (s === 'savedCloud' ? 'clean' : s)), 2500);
     } catch (e) {
@@ -2360,10 +1937,64 @@ export default function App() {
     return () => window.removeEventListener('beforeunload', handler);
   }, [saveStatus]);
 
+  // Recarrega da nuvem (descarta alterações locais não salvas, com confirmação).
+  const reloadFromCloud = useCallback(async () => {
+    const unsaved = saveStatus === 'dirty' || saveStatus === 'error';
+    if (unsaved && !window.confirm('Há alterações não salvas neste aparelho. Recarregar da nuvem vai descartá-las. Continuar?')) return;
+    setReloading(true);
+    try {
+      const res = await loadData();
+      setData(res.data);
+      setCloudUpdatedAt(res.updatedAt);
+      if (res.source === 'cloud') setLastSyncAt(Date.now());
+      setSaveStatus('clean');
+    } finally {
+      setReloading(false);
+    }
+  }, [saveStatus]);
+
+  // Atualiza ao voltar o foco/visibilidade, se não houver edição pendente e a
+  // nuvem tiver versão mais nova (outro aparelho salvou) — evita conflito.
+  const saveStatusRef = useRef(saveStatus);
+  useEffect(() => { saveStatusRef.current = saveStatus; }, [saveStatus]);
+  const cloudUpdatedAtRef = useRef(cloudUpdatedAt);
+  useEffect(() => { cloudUpdatedAtRef.current = cloudUpdatedAt; }, [cloudUpdatedAt]);
+
+  useEffect(() => {
+    const onVisible = async () => {
+      if (document.visibilityState !== 'visible') return;
+      const st = saveStatusRef.current;
+      if (st !== 'clean' && st !== 'savedCloud') return; // não mexe se há edição pendente
+      const cloud = await fetchCloudData();
+      if (cloud.data && cloud.data.length && cloud.updatedAt && cloud.updatedAt !== cloudUpdatedAtRef.current) {
+        setData(cloud.data);
+        saveLocalData(JSON.stringify(cloud.data));
+        setCloudUpdatedAt(cloud.updatedAt);
+        setLastSyncAt(Date.now());
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
+
   const showViewToggle = MONTHLY_TABS.includes(tab);
 
   // Saldo a liquidar (anual, considerando meses liquidados) para exibição no header.
   const pending = useMemo(() => pendingSettlement(a.monthly, paidMonths), [a.monthly, paidMonths]);
+
+  // Tela de carregando — evita piscar a amostra inicial antes de vir da nuvem.
+  if (!loaded) {
+    return (
+      <div style={{ background:C.bg, minHeight:'100vh', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:14, color:C.muted }}>
+        <div style={{ fontSize:34 }}>☁︎</div>
+        <p style={{ fontSize:14, letterSpacing:1 }}>Carregando seus dados…</p>
+        <div style={{ width:120, height:3, borderRadius:2, overflow:'hidden', background:C.dim }}>
+          <div style={{ width:'40%', height:'100%', background:C.gold, animation:'bgload 1s ease-in-out infinite' }} />
+        </div>
+        <style>{`@keyframes bgload{0%{margin-left:-40%}100%{margin-left:100%}}`}</style>
+      </div>
+    );
+  }
 
   return (
     <HideCtx.Provider value={hideBalances}>
@@ -2400,8 +2031,19 @@ export default function App() {
                 <span style={{ fontSize:12, color:C.gold, fontWeight:600 }}>{currentMonthLabel}</span>
               </div>
             </div>
-            <div style={{ display:'flex', alignItems:'center', gap:12, flexWrap:'wrap', justifyContent:'space-between', flex: isMobile ? '1 1 100%' : '0 0 auto' }}>
-              <SaveButton status={saveStatus} onSave={handleSave} />
+            <div style={{ display:'flex', alignItems:'center', gap:10, flexWrap:'wrap', justifyContent:'space-between', flex: isMobile ? '1 1 100%' : '0 0 auto' }}>
+              <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                <SaveButton status={saveStatus} onSave={handleSave} />
+                <button
+                  onClick={reloadFromCloud}
+                  disabled={reloading}
+                  aria-label="Recarregar da nuvem"
+                  title={lastSyncAt ? `Sincronizado às ${new Date(lastSyncAt).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})} — toque para recarregar da nuvem` : 'Recarregar da nuvem'}
+                  style={{ background:'transparent', color:C.muted, border:`1px solid ${C.border}`, borderRadius:26, padding:'8px 12px', fontSize:14, cursor:reloading?'default':'pointer', minHeight:40, display:'inline-flex', alignItems:'center' }}
+                >
+                  {reloading ? '⏳' : '↻'}
+                </button>
+              </div>
               <HideBalancesToggle hide={hideBalances} onChange={toggleHideBalance} />
               <div style={{ textAlign:'right' }}>
                 <p style={{ fontSize:10, color:C.muted, letterSpacing:1, textTransform:'uppercase' }}>Saldo a Liquidar</p>
